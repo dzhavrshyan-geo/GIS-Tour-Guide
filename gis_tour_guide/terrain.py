@@ -5,6 +5,8 @@
 
 import heapq
 import math
+import threading
+from concurrent.futures import ThreadPoolExecutor
 
 import numpy as np
 
@@ -68,6 +70,7 @@ class TerrariumSource:
         self.max_zoom = max_zoom
         self.decode = decode
         self.tiles = {}
+        self.lock = threading.Lock()
 
     def tile(self, z, x, y):
         n = 2 ** z
@@ -75,10 +78,21 @@ class TerrariumSource:
         if not 0 <= y < n:
             return None
         key = (z, x, y)
-        if key not in self.tiles:
-            data = self.http.get(TERRARIUM_URL.format(z=z, x=x, y=y), ttl=365 * 86400)
-            self.tiles[key] = self.decode(data)
-        return self.tiles[key]
+        with self.lock:
+            if key in self.tiles:
+                return self.tiles[key]
+        data = self.http.get(TERRARIUM_URL.format(z=z, x=x, y=y), ttl=365 * 86400)
+        heights = self.decode(data)
+        with self.lock:
+            self.tiles[key] = heights
+        return heights
+
+    def prefetch(self, keys, workers=8):
+        """Скачать несколько тайлов параллельно (S3 не ограничивает частоту запросов)."""
+        keys = [k for k in keys if k not in self.tiles]
+        if len(keys) > 1:
+            with ThreadPoolExecutor(workers) as pool:
+                list(pool.map(lambda k: self.tile(*k), keys))
 
     def sample(self, lon, lat, z=12):
         fx, fy = geo.lonlat_to_tile(lon, lat, z)
@@ -99,6 +113,7 @@ class TerrariumSource:
                 break
         tx0, ty0, tx1, ty1 = int(x0), int(y0), int(x1), int(y1)
         mosaic = np.full(((ty1 - ty0 + 1) * 256, (tx1 - tx0 + 1) * 256), np.nan, np.float32)
+        self.prefetch([(z, tx, ty) for ty in range(ty0, ty1 + 1) for tx in range(tx0, tx1 + 1)])
         for ty in range(ty0, ty1 + 1):
             for tx in range(tx0, tx1 + 1):
                 tile = self.tile(z, tx, ty)

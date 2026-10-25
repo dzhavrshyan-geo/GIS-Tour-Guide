@@ -1,87 +1,45 @@
 # -*- coding: utf-8 -*-
-"""Фоновые задачи QGIS: поиск объекта и сборка экскурсии (сеть не тормозит окно)."""
+"""Фоновые задачи QGIS: поиск объекта, подбор попутных объектов, создание экскурсии."""
 
-import os
 import traceback
 
 from qgis.core import QgsTask
 from qgis.PyQt.QtCore import pyqtSignal
 
 from . import geo, geocode, report, terrain
-from .net import Cancelled, Http, NetError
 from .maps import enum
+from .net import Cancelled, Http, NetError
 from .planner import Planner
 
 CAN_CANCEL = enum(QgsTask, "CanCancel", "Flag.CanCancel")
 
+# Этапы фоновой задачи после planner.plan и этапы главного потока (слои, карты, отчёт)
+TASK_STAGES = [("images", "Загрузка фотографий", 3), ("relief", "Рельеф для карт", 4)]
+FINISH_STAGES = [("layers", "Слои и GeoPackage", 2), ("maps", "Карты-схемы", 6),
+                 ("report", "Отчёт HTML и PDF", 3)]
 
-class GeocodeTask(QgsTask):
+
+class BaseTask(QgsTask):
     log_message = pyqtSignal(str)
+    stage_changed = pyqtSignal(str, float)
 
-    def __init__(self, query, cache_dir, lang="ru"):
-        super().__init__("ГИС-экскурсовод: поиск «%s»" % query, CAN_CANCEL)
-        self.query, self.cache_dir, self.lang = query, cache_dir, lang
-        self.places = []
-        self.error = ""
-
-    def run(self):
-        try:
-            http = Http(self.cache_dir, is_cancelled=self.isCanceled)
-            self.places = geocode.geocode(http, self.query, self.lang)
-            return True
-        except Cancelled:
-            return False
-        except NetError as error:
-            self.error = str(error)
-        except Exception:  # noqa: BLE001 - покажем в журнале
-            self.error = traceback.format_exc()
-        return False
-
-
-class TourTask(QgsTask):
-    """Всё, что не трогает проект QGIS: данные, маршрут, фото, ЦМР, профиль, GPX."""
-    log_message = pyqtSignal(str)
-
-    def __init__(self, settings, folder, cache_dir, elevation=None, use_terrain_tiles=True,
-                 relief=True):
-        super().__init__("ГИС-экскурсовод: %s" % (settings.query or settings.place.name),
-                         CAN_CANCEL)
-        self.settings = settings
-        self.folder = folder
+    def __init__(self, title, cache_dir):
+        super().__init__(title, CAN_CANCEL)
         self.cache_dir = cache_dir
-        self.elevation = elevation
-        self.use_terrain_tiles = use_terrain_tiles
-        self.relief = relief
-        self.tour = None
-        self.dem_path = None
-        self.profile_png = None
         self.error = ""
 
     def log(self, text):
         self.log_message.emit(text)
 
+    def stage(self, key, fraction):
+        self.stage_changed.emit(key, float(fraction))
+
+    def http(self):
+        return Http(self.cache_dir, is_cancelled=self.isCanceled)
+
     def run(self):
         try:
-            os.makedirs(self.folder, exist_ok=True)
-            http = Http(self.cache_dir, is_cancelled=self.isCanceled)
-            elevation = self.elevation
-            if elevation is None and self.use_terrain_tiles:
-                elevation = terrain.TerrariumSource(http)
-            planner = Planner(http, self.settings, elevation,
-                              progress=lambda pct, _text: self.setProgress(pct * 0.9), log=self.log)
-            tour = planner.run()
-            self.log("Скачиваю фотографии…")
-            report.download_images(http, tour, os.path.join(self.folder, "photos"), self.log)
-            report.write_gpx(tour, os.path.join(self.folder, "route.gpx"))
-            if elevation is not None and self.relief:
-                self.log("Рельеф для карты-схемы…")
-                self.dem_path = self.make_dem(tour, elevation)
-            if tour.profile:
-                path = os.path.join(self.folder, "profile.png")
-                if report.draw_profile(tour, path):
-                    self.profile_png = path
-            self.tour = tour
-            self.setProgress(95)
+            self.work()
             return True
         except Cancelled:
             return False
@@ -91,13 +49,74 @@ class TourTask(QgsTask):
             self.error = traceback.format_exc()
         return False
 
+    def work(self):
+        raise NotImplementedError
+
+
+class GeocodeTask(BaseTask):
+
+    def __init__(self, query, cache_dir, lang="ru"):
+        super().__init__("ГИС-экскурсовод: поиск «%s»" % query, cache_dir)
+        self.query, self.lang = query, lang
+        self.places = []
+
+    def work(self):
+        self.places = geocode.geocode(self.http(), self.query, self.lang)
+
+
+class CollectTask(BaseTask):
+    """«Подобрать попутные объекты»: регион, тип туризма, объекты, их популярность."""
+
+    def __init__(self, settings, cache_dir):
+        super().__init__("ГИС-экскурсовод: попутные объекты", cache_dir)
+        self.settings = settings
+        self.tour = None
+
+    def work(self):
+        planner = Planner(self.http(), self.settings, progress=self.stage, log=self.log)
+        self.tour = planner.collect(self.settings.place)
+
+
+class TourTask(BaseTask):
+    """«Создать экскурсию»: всё, что не трогает проект QGIS (маршрут, сведения, фото, рельеф)."""
+
+    def __init__(self, tour, settings, cache_dir, gpx_path, elevation=None, use_terrain_tiles=True,
+                 photos_dir=None):
+        super().__init__("ГИС-экскурсовод: %s" % tour.place.name, cache_dir)
+        self.tour = tour
+        self.settings = settings
+        self.gpx_path = gpx_path
+        self.elevation = elevation
+        self.use_terrain_tiles = use_terrain_tiles
+        self.photos_dir = photos_dir
+        self.dem_grid = None
+
+    def work(self):
+        http = self.http()
+        elevation = self.elevation
+        if elevation is None and self.use_terrain_tiles and not self.tour.urban:
+            elevation = terrain.TerrariumSource(http)
+        planner = Planner(http, self.settings, elevation, progress=self.stage, log=self.log)
+        tour = planner.plan(self.tour)
+
+        self.stage("images", 0)
+        report.collect_images(http, tour, self.photos_dir, self.log,
+                              lambda part: self.stage("images", part))
+        self.stage("images", 1)
+        if tour.urban or elevation is None:
+            self.stage("relief", -1)
+        else:
+            self.stage("relief", 0)
+            self.dem_grid = self.make_dem(tour, elevation)
+            self.stage("relief", 1)
+        tour.profile_png = report.draw_profile(tour)
+        report.write_gpx(tour, self.gpx_path)
+
     def make_dem(self, tour, elevation):
-        from .maps import write_dem
         coords = [c for leg in tour.legs for s in leg.segments for c in s.coords]
         box = geo.bbox_union(tour.bbox, geo.bbox_of(coords, 500)) if coords else tour.bbox
         try:
-            grid = elevation.grid(box, max_cells=900)
-            return write_dem(grid, os.path.join(self.folder, "dem.tif"))
+            return elevation.grid(box, max_cells=900)
         except Cancelled:
             raise
         except Exception as error:  # noqa: BLE001 - без отмывки рельефа тоже можно

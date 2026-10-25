@@ -60,8 +60,30 @@ def split_wiki_tag(value, default_lang="ru"):
     return default_lang, value
 
 
-def guess_category(description):
-    for word in re.findall(r"\w+", (description or "").lower().replace("ё", "е")):
+# Городские объекты по первым словам описания Викиданных
+URBAN_WORDS = [
+    ("музей", ("museum", "Музей", 8)), ("галерея", ("gallery", "Галерея", 6)),
+    ("собор", ("worship", "Собор", 6)), ("храм", ("worship", "Храм", 5)),
+    ("церковь", ("worship", "Церковь", 5)), ("монастырь", ("worship", "Монастырь", 6)),
+    ("мечеть", ("worship", "Мечеть", 5)), ("синагога", ("worship", "Синагога", 5)),
+    ("театр", ("theatre", "Театр", 5)), ("памятник", ("historic", "Памятник", 5)),
+    ("монумент", ("historic", "Монумент", 5)), ("кремль", ("historic", "Кремль", 8)),
+    ("крепость", ("historic", "Крепость", 7)), ("дворец", ("historic", "Дворец", 7)),
+    ("усадьба", ("historic", "Усадьба", 6)), ("башня", ("tower", "Башня", 5)),
+    ("площадь", ("square", "Площадь", 5)), ("парк", ("park", "Парк", 4)),
+    ("сад", ("park", "Сад", 4)), ("мост", ("historic", "Мост", 4)),
+    ("зоопарк", ("zoo", "Зоопарк", 7)), ("здание", ("historic", "Здание", 3)),
+    ("особняк", ("historic", "Особняк", 4)), ("фонтан", ("fountain", "Фонтан", 3)),
+]
+
+
+def guess_category(description, mode="nature"):
+    words = re.findall(r"\w+", (description or "").lower().replace("ё", "е"))
+    if mode == "urban":
+        for stem, found in URBAN_WORDS:
+            if any(word.startswith(stem) for word in words[:4]):
+                return found
+    for word in words:
         if word in TYPE_WORDS and TYPE_WORDS[word] in CATEGORY_FROM_TYPE:
             return CATEGORY_FROM_TYPE[TYPE_WORDS[word]]
     return None
@@ -98,7 +120,7 @@ def search_places(http, query, lang="ru", limit=5):
     return places
 
 
-def nearby_articles(http, bbox, center, lang="ru", limit=100):
+def nearby_articles(http, bbox, center, lang="ru", limit=100, mode="nature"):
     """Статьи о достопримечательностях в прямоугольнике — как Poi."""
     west, south, east, north = bbox
     base = {"action": "query", "generator": "geosearch", "ggslimit": limit,
@@ -119,7 +141,7 @@ def nearby_articles(http, bbox, center, lang="ru", limit=100):
         lon, lat = coords[0]["lon"], coords[0]["lat"]
         if not geo.in_bbox(lon, lat, bbox):
             continue
-        found = guess_category(description)
+        found = guess_category(description, mode)
         category, kind, score = found or ("attraction", clip(description, 40) or "Статья Википедии", 5)
         title = page["title"]
         pois.append(Poi(
@@ -158,23 +180,73 @@ def merge_articles(pois, articles, radius_m=2000):
     return result
 
 
-def titles_from_wikidata(http, qids, lang="ru"):
-    """{Q123: 'ru:Название'} — статьи для объектов, у которых в OSM есть только wikidata."""
+def wikidata_links(http, qids, lang="ru"):
+    """{Q123: ('ru:Название' или '', число статей во всех Википедиях)}."""
     result = {}
-    qids = [q for q in qids if q]
+    qids = sorted({q for q in qids if q})
     for i in range(0, len(qids), 40):
         data = http.json("https://www.wikidata.org/w/api.php", {
             "action": "wbgetentities", "ids": "|".join(qids[i:i + 40]), "props": "sitelinks",
-            "sitefilter": "%swiki|enwiki" % lang, "format": "json",
+            "format": "json",
         }, ttl=30 * 86400)
         for qid, entity in (data.get("entities") or {}).items():
             links = entity.get("sitelinks") or {}
+            title = ""
             for code in (lang, "en"):
                 link = links.get(code + "wiki")
                 if link:
-                    result[qid] = "%s:%s" % (code, link["title"])
+                    title = "%s:%s" % (code, link["title"])
                     break
+            wikis = sum(1 for key in links if key.endswith("wiki") and key != "commonswiki")
+            result[qid] = (title, wikis)
     return result
+
+
+def titles_from_wikidata(http, qids, lang="ru"):
+    """{Q123: 'ru:Название'} — статьи для объектов, у которых в OSM есть только wikidata."""
+    return {qid: title for qid, (title, _) in wikidata_links(http, qids, lang).items() if title}
+
+
+def popularity(http, pois, lang="ru", days=30):
+    """Poi.popularity — просмотров статьи в день за последний месяц.
+
+    Если статьи на нужном языке нет, а есть Викиданные — грубая оценка по числу
+    Википедий, где об объекте написано (5 просмотров в день за каждую).
+    """
+    no_title = [p for p in pois if p.wikidata and not p.wikipedia]
+    links = wikidata_links(http, [p.wikidata for p in no_title], lang) if no_title else {}
+    for poi in no_title:
+        title, wikis = links.get(poi.wikidata, ("", 0))
+        poi.wikipedia = title
+        poi.popularity = 5.0 * wikis
+    by_lang = {}
+    for poi in pois:
+        code, title = split_wiki_tag(poi.wikipedia, lang)
+        if title:
+            by_lang.setdefault(code, {}).setdefault(title, []).append(poi)
+    for code, titles in by_lang.items():
+        names = list(titles)
+        for i in range(0, len(names), 50):
+            chunk = names[i:i + 50]
+            data = api(http, "%s.wikipedia.org" % code, {
+                "action": "query", "titles": "|".join(chunk), "redirects": 1,
+                "prop": "pageviews", "pvipdays": days}, ttl=3 * 86400)
+            query = data.get("query", {})
+            renamed = {}
+            for item in query.get("normalized", []) + query.get("redirects", []):
+                renamed[item["to"]] = renamed.get(item["from"], item["from"])
+            for page in query.get("pages", []):
+                original = page.get("title")
+                while original in renamed and original not in titles:
+                    original = renamed[original]
+                views = [v for v in (page.get("pageviews") or {}).values() if v is not None]
+                if not views:
+                    continue
+                per_day = sum(views) / float(len(views))
+                if code != lang:
+                    per_day *= 0.5   # статья только на другом языке — для русских туристов менее известен
+                for poi in titles.get(original, []):
+                    poi.popularity = max(poi.popularity, per_day)
 
 
 def fill_details(http, pois, lang="ru", sentences_limit=700):

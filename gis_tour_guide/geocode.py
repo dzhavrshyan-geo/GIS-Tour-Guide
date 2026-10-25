@@ -47,6 +47,7 @@ def place_from_nominatim(item, lang="ru"):
         display_name=item.get("display_name", ""),
         region=address.get("state") or address.get("region") or address.get("province") or
         address.get("county", ""),
+        city=address.get("city") or address.get("town") or address.get("village", ""),
         country=address.get("country", ""), country_code=(address.get("country_code") or "").lower(),
         osm_id="%s/%s" % (item.get("osm_type", ""), item.get("osm_id", "")),
         wikipedia=tags.get("wikipedia", ""), wikidata=tags.get("wikidata", ""),
@@ -98,18 +99,19 @@ def geocode(http, query, lang="ru", limit=8):
 
 
 def region_boundary(http, lon, lat, lang="ru"):
-    """(название региона, GeoJSON-геометрия, bbox) — субъект/штат, где лежит точка."""
+    """(название, GeoJSON-геометрия, bbox, id отношения OSM) — субъект/штат, где лежит точка."""
     params = {"lat": "%.6f" % lat, "lon": "%.6f" % lon, "zoom": 5, "format": "jsonv2",
               "polygon_geojson": 1, "polygon_threshold": 0.005, "accept-language": lang}
     item = http.json(NOMINATIM + "/reverse", params, ttl=90 * 86400)
     if not item or "error" in item:
-        return "", None, None
+        return "", None, None, 0
     bbox = None
     if item.get("boundingbox"):
         south, north, west, east = [float(v) for v in item["boundingbox"]]
         bbox = (west, south, east, north)
     name = item.get("name") or item.get("display_name", "").split(",")[0]
-    return name, item.get("geojson"), bbox
+    rel_id = int(item.get("osm_id") or 0) if item.get("osm_type") == "relation" else 0
+    return name, item.get("geojson"), bbox, rel_id
 
 
 def reverse_name(http, lon, lat, lang="ru", zoom=14):

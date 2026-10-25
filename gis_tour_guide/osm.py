@@ -1,8 +1,10 @@
 # -*- coding: utf-8 -*-
-"""OpenStreetMap: Overpass (объекты, магазины, ООПТ, города) и классификация тегов."""
+"""OpenStreetMap: Overpass (объекты, магазины, ООПТ, города, транспорт) и классификация тегов."""
+
+import re
 
 from . import geo
-from .model import Poi
+from .model import Poi, Settlement
 from .net import NetError
 from .text import norm_name
 
@@ -12,35 +14,66 @@ OVERPASS_URLS = [
     "https://overpass.kumi.systems/api/interpreter",
 ]
 
-# (ключ, тег, значения, подпись, баллы, нужно ли имя)
-CATEGORIES = [
-    ("volcano", "natural", ("volcano",), "Вулкан", 10, False),
-    ("geyser", "natural", ("geyser",), "Гейзер", 9, False),
-    ("fumarole", "natural", ("fumarole",), "Фумаролы", 7, False),
-    ("hot_spring", "natural", ("hot_spring",), "Горячий источник", 8, False),
-    ("waterfall", "natural", ("waterfall",), "Водопад", 8, False),
-    ("waterfall", "waterway", ("waterfall",), "Водопад", 8, False),
-    ("cave", "natural", ("cave_entrance",), "Пещера", 8, False),
-    ("arch", "natural", ("arch",), "Скальная арка", 7, False),
+# (ключ, тег, значения, подпись, баллы, нужно ли имя, нужна ли статья/Викиданные)
+NATURE_CATEGORIES = [
+    ("volcano", "natural", ("volcano",), "Вулкан", 10, False, False),
+    ("geyser", "natural", ("geyser",), "Гейзер", 9, False, False),
+    ("fumarole", "natural", ("fumarole",), "Фумаролы", 7, False, False),
+    ("hot_spring", "natural", ("hot_spring",), "Горячий источник", 8, False, False),
+    ("waterfall", "natural", ("waterfall",), "Водопад", 8, False, False),
+    ("waterfall", "waterway", ("waterfall",), "Водопад", 8, False, False),
+    ("cave", "natural", ("cave_entrance",), "Пещера", 8, False, False),
+    ("arch", "natural", ("arch",), "Скальная арка", 7, False, False),
     ("geological", "geological", ("volcanic_caldera_rim", "volcanic_vent", "volcanic_lava_field",
                                   "outcrop", "palaeontological_site", "glacial_erratic", "moraine"),
-     "Геологический объект", 6, False),
-    ("glacier", "natural", ("glacier",), "Ледник", 6, True),
-    ("peak", "natural", ("peak",), "Вершина", 6, True),
-    ("viewpoint", "tourism", ("viewpoint",), "Смотровая площадка", 6, False),
-    ("attraction", "tourism", ("attraction",), "Достопримечательность", 7, True),
-    ("museum", "tourism", ("museum",), "Музей", 7, True),
-    ("historic", "historic", None, "Исторический объект", 5, True),
-    ("spring", "natural", ("spring",), "Родник", 4, False),
-    ("rock", "natural", ("rock", "stone"), "Скала / камень", 4, True),
-    ("cliff", "natural", ("cliff",), "Скалы", 4, True),
-    ("lake", "natural", ("water",), "Озеро", 4, True),
-    ("beach", "natural", ("beach",), "Пляж", 3, True),
-    ("hut", "tourism", ("alpine_hut", "wilderness_hut"), "Приют / хижина", 4, False),
-    ("camp", "tourism", ("camp_site",), "Стоянка / кемпинг", 3, False),
-    ("artwork", "tourism", ("artwork",), "Арт-объект", 3, True),
-    ("picnic", "tourism", ("picnic_site",), "Место для пикника", 2, False),
+     "Геологический объект", 6, False, False),
+    ("glacier", "natural", ("glacier",), "Ледник", 6, True, False),
+    ("peak", "natural", ("peak",), "Вершина", 6, True, False),
+    ("viewpoint", "tourism", ("viewpoint",), "Смотровая площадка", 6, False, False),
+    ("attraction", "tourism", ("attraction",), "Достопримечательность", 7, True, False),
+    ("museum", "tourism", ("museum",), "Музей", 7, True, False),
+    ("historic", "historic", None, "Исторический объект", 5, True, False),
+    ("spring", "natural", ("spring",), "Родник", 4, False, False),
+    ("rock", "natural", ("rock", "stone"), "Скала / камень", 4, True, False),
+    ("cliff", "natural", ("cliff",), "Скалы", 4, True, False),
+    ("lake", "natural", ("water",), "Озеро", 4, True, False),
+    ("beach", "natural", ("beach",), "Пляж", 3, True, False),
+    ("hut", "tourism", ("alpine_hut", "wilderness_hut"), "Приют / хижина", 4, False, False),
+    ("camp", "tourism", ("camp_site",), "Стоянка / кемпинг", 3, False, False),
+    ("artwork", "tourism", ("artwork",), "Арт-объект", 3, True, False),
+    ("picnic", "tourism", ("picnic_site",), "Место для пикника", 2, False, False),
 ]
+
+# В городе объектов тысячи: исторические здания, храмы и фонтаны берём только со статьёй
+URBAN_CATEGORIES = [
+    ("museum", "tourism", ("museum",), "Музей", 8, True, False),
+    ("gallery", "tourism", ("gallery",), "Галерея", 6, True, False),
+    ("zoo", "tourism", ("zoo", "aquarium"), "Зоопарк / океанариум", 7, True, False),
+    ("attraction", "tourism", ("attraction",), "Достопримечательность", 7, True, False),
+    ("viewpoint", "tourism", ("viewpoint",), "Смотровая площадка", 6, False, False),
+    ("theme_park", "tourism", ("theme_park",), "Парк развлечений", 5, True, False),
+    ("historic", "historic", None, "Исторический объект", 6, True, True),
+    ("worship", "amenity", ("place_of_worship",), "Храм", 5, True, True),
+    ("theatre", "amenity", ("theatre",), "Театр", 5, True, True),
+    ("park", "leisure", ("park", "garden"), "Парк / сад", 4, True, True),
+    ("square", "place", ("square",), "Площадь", 4, True, True),
+    ("tower", "man_made", ("tower", "lighthouse"), "Башня / маяк", 4, True, True),
+    ("fountain", "amenity", ("fountain",), "Фонтан", 3, True, True),
+    ("artwork", "tourism", ("artwork",), "Скульптура / арт-объект", 3, True, True),
+]
+
+CATEGORIES = NATURE_CATEGORIES   # совместимость: по умолчанию — природа
+
+# Явно природные объекты — для них тип туризма «природный» без проверки застройки
+NATURE_KEYS = ("volcano", "geyser", "fumarole", "hot_spring", "waterfall", "cave", "arch",
+               "geological", "glacier", "peak", "spring", "rock", "cliff", "lake", "beach")
+URBAN_KEYS = ("museum", "gallery", "zoo", "theatre", "worship", "square", "park", "fountain",
+              "tower", "theme_park")
+
+# Длительность осмотра, мин
+VISIT_MINUTES = {"museum": 75, "gallery": 50, "zoo": 120, "theme_park": 90, "worship": 20,
+                 "theatre": 10, "park": 30, "square": 15, "fountain": 10, "artwork": 10,
+                 "tower": 20, "viewpoint": 20, "historic": 20, "attraction": 30}
 
 HISTORIC_KINDS = {
     "monument": "Памятник", "memorial": "Мемориал", "ruins": "Руины",
@@ -62,15 +95,23 @@ def tag_name(tags, lang="ru"):
     return tags.get("name:" + lang) or tags.get("name") or tags.get("name:en") or ""
 
 
-def classify(tags):
+def categories(mode="nature"):
+    return URBAN_CATEGORIES if mode == "urban" else NATURE_CATEGORIES
+
+
+def classify(tags, mode="nature"):
     """(ключ, подпись, баллы) или None для тегов OSM."""
-    for key, tag, values, label, score, need_name in CATEGORIES:
+    for key, tag, values, label, score, need_name, need_wiki in categories(mode):
         value = tags.get(tag)
         if not value or value == "no":
             continue
         if values and value not in values:
             continue
         if need_name and not tag_name(tags):
+            continue
+        if need_wiki and not (tags.get("wikidata") or tags.get("wikipedia")):
+            continue
+        if key == "historic" and tags.get("memorial") in ("plaque", "stolperstein"):
             continue
         if key == "lake" and tags.get("water") not in LAKE_WATERS:
             continue
@@ -114,14 +155,14 @@ def bbox_filter(bbox):
     return "(%.6f,%.6f,%.6f,%.6f)" % (south, west, north, east)
 
 
-def poi_query(bbox):
+def poi_query(bbox, mode="nature"):
     box = bbox_filter(bbox)
     parts = []
     by_tag = {}
-    for _key, tag, values, _label, _score, need_name in CATEGORIES:
-        by_tag.setdefault((tag, need_name), set()).update(values or ("*",))
-    for (tag, need_name), values in sorted(by_tag.items(), key=lambda kv: (kv[0][0], kv[0][1])):
-        named = '["name"]' if need_name else ""
+    for _key, tag, values, _label, _score, need_name, need_wiki in categories(mode):
+        by_tag.setdefault((tag, need_name, need_wiki), set()).update(values or ("*",))
+    for (tag, need_name, need_wiki), values in sorted(by_tag.items(), key=lambda kv: kv[0]):
+        named = ('["name"]' if need_name else "") + ('["wikidata"]' if need_wiki else "")
         if "*" in values:
             parts.append('nwr["%s"]%s%s;' % (tag, named, box))
         else:
@@ -129,9 +170,9 @@ def poi_query(bbox):
     return "[out:json][timeout:90];\n(\n%s\n);\nout center tags;" % "\n".join(parts)
 
 
-def poi_from_element(element, center, lang="ru"):
+def poi_from_element(element, center, lang="ru", mode="nature"):
     tags = element.get("tags") or {}
-    found = classify(tags)
+    found = classify(tags, mode)
     point = element_point(element)
     if not found or not point:
         return None
@@ -163,11 +204,11 @@ def poi_from_element(element, center, lang="ru"):
     return poi
 
 
-def find_pois(http, bbox, center, lang="ru"):
-    elements = overpass(http, poi_query(bbox))
+def find_pois(http, bbox, center, lang="ru", mode="nature"):
+    elements = overpass(http, poi_query(bbox, mode))
     pois = []
     for element in elements:
-        poi = poi_from_element(element, center, lang)
+        poi = poi_from_element(element, center, lang, mode)
         if poi and geo.in_bbox(poi.lon, poi.lat, bbox):
             pois.append(poi)
     return dedupe(pois)
@@ -189,14 +230,15 @@ def dedupe(pois, radius_m=700):
         if twin is None:
             kept.append(poi)
         else:
-            for attr in ("wikipedia", "wikidata", "description", "elevation"):
+            for attr in ("wikipedia", "wikidata", "description", "elevation", "popularity"):
                 if not getattr(twin, attr) and getattr(poi, attr):
                     setattr(twin, attr, getattr(poi, attr))
     return kept
 
 
 def rank(pois):
-    return sorted(pois, key=lambda p: (-p.score, p.distance_km))
+    """Самые популярные первыми (просмотры статьи + интерес по типу), при равенстве — ближе."""
+    return sorted(pois, key=lambda p: (-p.rank, p.distance_km))
 
 
 # --- Обслуживание: магазины, заправки, вода ---
@@ -296,3 +338,155 @@ def nearest_town(http, lon, lat, radii_km=(60, 200, 500)):
         if best:
             return best[1], best[2][0], best[2][1]
     return None
+
+
+# --- Тип туризма, населённые пункты, транспорт ---
+
+def building_count(http, lon, lat, radius_m=700):
+    """Сколько зданий вокруг — плотная застройка значит городской туризм."""
+    query = '[out:json][timeout:30];way["building"](around:%d,%.6f,%.6f);out count;' % (
+        radius_m, lat, lon)
+    for element in overpass(http, query):
+        if element.get("type") == "count":
+            tags = element.get("tags") or {}
+            return int(tags.get("ways") or tags.get("total") or 0)
+    return 0
+
+
+def population(tags):
+    digits = re.sub(r"[^\d]", "", str(tags.get("population", "")).split(";")[0])
+    return int(digits) if digits else 0
+
+
+def settlement(element, role="near"):
+    tags = element.get("tags") or {}
+    point = element_point(element)
+    if not point or not tag_name(tags):
+        return None
+    return Settlement(tag_name(tags), point[0], point[1], tags.get("place", ""), population(tags),
+                      role)
+
+
+def region_settlements(http, rel_id):
+    """(региональный центр, [города и посёлки региона]) по id отношения границы региона."""
+    capital = None
+    try:
+        elements = overpass(http, '[out:json][timeout:60];rel(%d);node(r:"admin_centre");out;'
+                            % rel_id, ttl=90 * 86400)
+        found = [settlement(e, "capital") for e in elements]
+        capital = next((c for c in found if c), None)
+    except NetError:
+        pass
+    towns = []
+    elements = overpass(http, '[out:json][timeout:120];area(%d)->.a;'
+                        'node(area.a)["place"~"^(city|town)$"];out;' % (3600000000 + rel_id),
+                        ttl=90 * 86400)
+    for element in elements:
+        item = settlement(element, "major")
+        if item:
+            towns.append(item)
+            if capital is None and (element.get("tags") or {}).get("capital") in ("4", "3", "yes"):
+                capital = Settlement(item.name, item.lon, item.lat, item.place, item.population,
+                                     "capital")
+    if capital is None and towns:
+        biggest = max(towns, key=lambda t: t.population)
+        capital = Settlement(biggest.name, biggest.lon, biggest.lat, biggest.place,
+                             biggest.population, "capital")
+    if capital is not None:
+        same = next((t for t in towns if t.name == capital.name), None)
+        if same and not capital.population:
+            capital.population = same.population
+    return capital, towns
+
+
+def near_settlements(http, lon, lat, radius_km=30, limit=8):
+    """Населённые пункты вокруг объекта: города и посёлки важнее деревень."""
+    query = ('[out:json][timeout:60];node["place"~"^(city|town|village)$"](around:%d,%.6f,%.6f);'
+             "out;") % (radius_km * 1000, lat, lon)
+    found = []
+    for element in overpass(http, query):
+        item = settlement(element, "near")
+        if item:
+            km = geo.dist_m((lon, lat), item.point) / 1000.0
+            weight = km * {"city": 0.3, "town": 0.6}.get(item.place, 1.0)
+            found.append((weight, item))
+    found.sort(key=lambda pair: pair[0])
+    return [item for _, item in found[:limit]]
+
+
+def pick_start(capital, towns, point, big=200000):
+    """Откуда ехать: региональный центр, но если город от 200 тыс. ближе — от него."""
+    options = ([capital] if capital else []) + [t for t in towns if t.population >= big]
+    if not options:
+        return None, ""
+    best = min(options, key=lambda t: geo.dist_m(t.point, point))
+    if capital and best.name != capital.name:
+        return best, "ближайший к объекту город с населением больше 200 тыс."
+    return best, "региональный центр"
+
+
+TRANSPORT_KINDS = [("subway", "Метро"), ("train", "Ж/д станция"), ("tram", "Трамвай"),
+                   ("bus", "Автобус")]
+
+
+def transport_kind(tags):
+    if tags.get("station") == "subway" or tags.get("subway") == "yes" or \
+            tags.get("railway") == "subway_entrance":
+        return "subway"
+    if tags.get("railway") in ("station", "halt"):
+        return "train"
+    if tags.get("railway") == "tram_stop":
+        return "tram"
+    if tags.get("highway") == "bus_stop" or tags.get("public_transport") == "platform":
+        return "bus"
+    return None
+
+
+def transport_near(http, lon, lat, radius_m=1500):
+    """Ближайшие остановки: [(вид, название, км)] — по два каждого вида."""
+    around = "(around:%d,%.6f,%.6f)" % (radius_m, lat, lon)
+    short = "(around:%d,%.6f,%.6f)" % (min(radius_m, 600), lat, lon)
+    query = ("[out:json][timeout:40];(\n"
+             'nwr["station"="subway"]%s;nwr["railway"~"^(station|halt)$"]%s;'
+             'node["railway"="tram_stop"]%s;node["highway"="bus_stop"]%s;'
+             ");out center tags 300;") % (around, around, short, short)
+    best = {}
+    for element in overpass(http, query):
+        tags = element.get("tags") or {}
+        kind = transport_kind(tags)
+        point = element_point(element)
+        if not kind or not point or not tag_name(tags):
+            continue
+        km = geo.dist_m((lon, lat), point) / 1000.0
+        items = best.setdefault(kind, {})
+        name = tag_name(tags)
+        if name not in items or km < items[name][1]:
+            items[name] = (point, km)
+    result = []
+    for kind, label in TRANSPORT_KINDS:
+        items = sorted(best.get(kind, {}).items(), key=lambda kv: kv[1][1])[:2]
+        result += [(label, name, km, point) for name, (point, km) in items]
+    return result
+
+
+CUISINES = {"russian": "русская", "italian": "итальянская", "pizza": "пицца", "coffee_shop": "кофейня",
+            "georgian": "грузинская", "japanese": "японская", "sushi": "суши", "burger": "бургеры",
+            "chinese": "китайская", "regional": "местная", "asian": "азиатская"}
+
+
+def places_to_eat(http, lon, lat, radius_m=700, limit=6):
+    """Кафе и рестораны рядом с маршрутом: [(название, вид, км)]."""
+    query = ('[out:json][timeout:40];nwr["amenity"~"^(cafe|restaurant)$"]["name"]'
+             "(around:%d,%.6f,%.6f);out center tags 200;") % (radius_m, lat, lon)
+    found = []
+    for element in overpass(http, query):
+        tags = element.get("tags") or {}
+        point = element_point(element)
+        if not point:
+            continue
+        kind = "кафе" if tags.get("amenity") == "cafe" else "ресторан"
+        cuisine = CUISINES.get((tags.get("cuisine") or "").split(";")[0], "")
+        found.append((tag_name(tags), kind + (", " + cuisine if cuisine else ""),
+                      geo.dist_m((lon, lat), point) / 1000.0))
+    found.sort(key=lambda item: item[2])
+    return found[:limit]

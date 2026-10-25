@@ -148,12 +148,69 @@ def parse_coords(url):
     return [tuple(float(v) for v in pair.split(",")) for pair in part.split(";")]
 
 
-class FakeHttp:
-    """Минимальная замена net.Http: отвечает по адресу запроса."""
+# --- Город: Московский Кремль ---
 
-    def __init__(self, fail=()):
+KREMLIN = (37.6175, 55.7520)
+
+URBAN_POIS = {"elements": [
+    {"type": "way", "id": 101, "center": {"lat": 55.7539, "lon": 37.6208},
+     "tags": {"place": "square", "name": "Красная площадь", "wikidata": "Q10"}},
+    {"type": "way", "id": 102, "center": {"lat": 55.7525, "lon": 37.6231},
+     "tags": {"amenity": "place_of_worship", "name": "Собор Василия Блаженного", "wikidata": "Q11",
+              "wikipedia": "ru:Храм Василия Блаженного", "opening_hours": "Mo-Su 11:00-17:00",
+              "fee": "yes"}},
+    {"type": "way", "id": 103, "center": {"lat": 55.7553, "lon": 37.6178},
+     "tags": {"tourism": "museum", "name": "Государственный исторический музей", "wikidata": "Q12",
+              "opening_hours": "Mo,We-Su 10:00-18:00", "website": "https://shm.ru"}},
+    {"type": "way", "id": 104, "center": {"lat": 55.7527, "lon": 37.6129},
+     "tags": {"leisure": "park", "name": "Александровский сад", "wikidata": "Q13"}},
+    {"type": "way", "id": 105, "center": {"lat": 55.7601, "lon": 37.6186},
+     "tags": {"amenity": "theatre", "name": "Большой театр", "wikidata": "Q14"}},
+    {"type": "node", "id": 106, "lat": 55.7510, "lon": 37.6175,
+     "tags": {"historic": "monument", "name": "Царь-пушка", "wikidata": "Q15"}},
+    {"type": "node", "id": 107, "lat": 55.7530, "lon": 37.6150,
+     "tags": {"historic": "memorial", "memorial": "plaque", "name": "Доска", "wikidata": "Q16"}},
+    {"type": "way", "id": 108, "center": {"lat": 55.7600, "lon": 37.6100},
+     "tags": {"amenity": "place_of_worship", "name": "Церковь без статьи"}},   # не берём
+]}
+
+URBAN_WIKI_GEO = {"query": {"pages": [
+    {"title": "Большой Кремлёвский дворец", "description": "дворец в Московском Кремле",
+     "coordinates": [{"lat": 55.7499, "lon": 37.6155}], "pageprops": {"wikibase_item": "Q20"}},
+    {"title": "Охотный Ряд (станция метро)", "description": "станция Московского метрополитена",
+     "coordinates": [{"lat": 55.7577, "lon": 37.6156}]},
+    {"title": "Тверская улица", "description": "улица в Москве",
+     "coordinates": [{"lat": 55.7600, "lon": 37.6110}]},
+    {"title": "Красная площадь", "description": "площадь в Москве",
+     "coordinates": [{"lat": 55.7539, "lon": 37.6208}], "pageprops": {"wikibase_item": "Q10"}},
+]}}
+
+PAGEVIEWS = {"Горелый (вулкан)": 120, "Вилючинский водопад": 300, "Кратер Активный": 15,
+             "Московский Кремль": 5000, "Красная площадь": 3000, "Храм Василия Блаженного": 2500,
+             "Государственный исторический музей": 800, "Большой театр": 1500,
+             "Большой Кремлёвский дворец": 400, "Александровский сад (Москва)": 300, "Царь-пушка": 900}
+WIKIDATA_TITLES = {"Q12": "Государственный исторический музей", "Q13": "Александровский сад (Москва)",
+                   "Q14": "Большой театр", "Q15": "Царь-пушка", "Q10": "Красная площадь"}
+
+
+def fake_jpeg(seed):
+    from qgis.PyQt.QtGui import QColor, QImage
+    from gis_tour_guide.report import image_bytes
+    image = QImage(64, 40, QImage.Format.Format_RGB32)
+    image.fill(QColor.fromHsv(seed * 37 % 360, 120, 200))
+    return image_bytes(image, "JPG", 80)
+
+
+class FakeHttp:
+    """Минимальная замена net.Http: отвечает по адресу запроса.
+
+    scenario — "nature" (вулкан Горелый) или "urban" (Московский Кремль).
+    """
+
+    def __init__(self, fail=(), scenario="nature"):
         self.calls = []
         self.fail = set(fail)
+        self.scenario = scenario
 
     def check(self):
         pass
@@ -168,7 +225,7 @@ class FakeHttp:
             z, x, y = [int(v) for v in url.rsplit(".", 1)[0].split("/")[-3:]]
             return terrarium_png(z, x, y)
         if host == "upload.wikimedia.org" or host == "static.inaturalist.org":
-            return b"\xff\xd8\xff\xe0fakejpeg"
+            return fake_jpeg(len(url))
         return json.dumps(self.answer(url, params or {}, data)).encode("utf-8")
 
     def json(self, url, params=None, data=None, ttl=0, headers=None, tries=2):
@@ -177,6 +234,10 @@ class FakeHttp:
     def answer(self, url, params, data):
         host = urllib.parse.urlsplit(url).hostname
         path = urllib.parse.urlsplit(url).path
+        if self.scenario == "urban":
+            urban = self.urban_answer(host, path, params, data)
+            if urban is not None:
+                return urban
         if host == "nominatim.openstreetmap.org":
             if path.endswith("/search"):
                 if "Петропавловск" in params["q"]:
@@ -192,6 +253,7 @@ class FakeHttp:
                          "boundingbox": ["52.55", "52.57", "158.02", "158.04"]}]
             if params.get("zoom") == 5:
                 return {"name": "Камчатский край", "boundingbox": ["50.8", "65.0", "155.5", "174.5"],
+                        "osm_type": "relation", "osm_id": 151233,
                         "geojson": {"type": "Polygon", "coordinates": [[
                             [155.5, 50.8], [165.0, 50.8], [165.0, 60.0], [155.5, 60.0], [155.5, 50.8]]]}}
             return {"address": {"village": "Термальный"}}
@@ -202,6 +264,28 @@ class FakeHttp:
                 return {"elements": [{"type": "area", "id": 1, "tags": {
                     "boundary": "protected_area", "name": "Южно-Камчатский природный парк",
                     "protection_title": "природный парк"}}]}
+            if "out count" in query:
+                return {"elements": [{"type": "count", "id": 0, "tags": {"ways": "0", "total": "0"}}]}
+            if "admin_centre" in query:
+                return {"elements": [{"type": "node", "id": 50, "lat": TOWN[1], "lon": TOWN[0], "tags": {
+                    "place": "city", "name": "Петропавловск-Камчатский", "population": "164 900"}}]}
+            if "area(" in query:
+                return {"elements": [
+                    {"type": "node", "id": 50, "lat": TOWN[1], "lon": TOWN[0], "tags": {
+                        "place": "city", "name": "Петропавловск-Камчатский", "population": "164900",
+                        "capital": "4"}},
+                    {"type": "node", "id": 51, "lat": 53.19, "lon": 158.38, "tags": {
+                        "place": "town", "name": "Елизово", "population": "38000"}},
+                    {"type": "node", "id": 52, "lat": 52.93, "lon": 158.40, "tags": {
+                        "place": "town", "name": "Вилючинск", "population": "21000"}},
+                    {"type": "node", "id": 53, "lat": 56.32, "lon": 160.84, "tags": {
+                        "place": "town", "name": "Ключи", "population": "4500"}}]}
+            if '"place"~"^(city|town|village)$"' in query:
+                return {"elements": [
+                    {"type": "node", "id": 54, "lat": 52.83, "lon": 158.18, "tags": {
+                        "place": "village", "name": "Термальный"}},
+                    {"type": "node", "id": 55, "lat": 52.91, "lon": 158.22, "tags": {
+                        "place": "village", "name": "Паратунка"}}]}
             if '"place"~' in query:
                 return {"elements": [{"type": "node", "id": 50, "lat": TOWN[1], "lon": TOWN[0],
                                       "tags": {"place": "city", "name": "Петропавловск-Камчатский"}}]}
@@ -214,6 +298,8 @@ class FakeHttp:
                 return {"elements": []}
             return OVERPASS_POIS
         if host == "ru.wikipedia.org":
+            if params.get("prop") == "pageviews":
+                return pageviews(params)
             if params.get("generator") == "geosearch":
                 return WIKI_GEO
             if params.get("generator") == "search":
@@ -222,7 +308,9 @@ class FakeHttp:
                                              "coordinates": [{"lat": 52.5581, "lon": 158.0301}]}]}}
             return WIKI_DETAILS
         if host == "www.wikidata.org":
-            return {"entities": {}}
+            return {"entities": {q: {"sitelinks": {"ruwiki": {"title": WIKIDATA_TITLES[q]},
+                                                   "enwiki": {"title": "x"}, "dewiki": {"title": "y"}}}
+                                 for q in params["ids"].split("|") if q in WIKIDATA_TITLES}}
         if host == "ru.wikivoyage.org":
             if params.get("list") == "search":
                 hits = [{"title": params["srsearch"]}] if "Камчат" in params["srsearch"] else []
@@ -291,3 +379,87 @@ class FakeHttp:
                 {"description": "ок", "user": {"login": "x"}},
             ]}
         raise NetError("Неизвестный адрес в тесте: " + url)
+
+
+    def urban_answer(self, host, path, params, data):
+        """Ответы для городского сценария; None — как в природном."""
+        if host == "nominatim.openstreetmap.org":
+            if path.endswith("/search"):
+                return [{"lat": str(KREMLIN[1]), "lon": str(KREMLIN[0]), "name": "Московский Кремль",
+                         "category": "historic", "type": "castle", "osm_type": "way", "osm_id": 900,
+                         "display_name": "Московский Кремль, Тверской район, Москва, Россия",
+                         "address": {"city": "Москва", "state": "Москва", "country": "Россия",
+                                     "country_code": "ru"},
+                         "extratags": {"wikidata": "Q900", "wikipedia": "ru:Московский Кремль"}}]
+            if params.get("zoom") == 5:
+                return {"name": "Москва", "boundingbox": ["55.14", "56.02", "36.80", "37.97"],
+                        "osm_type": "relation", "osm_id": 102269,
+                        "geojson": {"type": "Polygon", "coordinates": [[
+                            [36.8, 55.14], [37.97, 55.14], [37.97, 56.02], [36.8, 56.02], [36.8, 55.14]]]}}
+            return {"address": {"suburb": "Тверской район"}}
+        if host in ("overpass-api.de", "maps.mail.ru", "overpass.kumi.systems"):
+            query = data["data"] if isinstance(data, dict) else \
+                urllib.parse.parse_qs(data.decode())["data"][0]
+            if "out count" in query:
+                return {"elements": [{"type": "count", "id": 0, "tags": {"ways": "2400"}}]}
+            if "admin_centre" in query:
+                return {"elements": [{"type": "node", "id": 1, "lat": 55.7558, "lon": 37.6173, "tags": {
+                    "place": "city", "name": "Москва", "population": "13010112"}}]}
+            if "area(" in query:
+                return {"elements": [
+                    {"type": "node", "id": 1, "lat": 55.7558, "lon": 37.6173, "tags": {
+                        "place": "city", "name": "Москва", "population": "13010112", "capital": "yes"}},
+                    {"type": "node", "id": 2, "lat": 55.9825, "lon": 37.1814, "tags": {
+                        "place": "city", "name": "Зеленоград", "population": "250000"}}]}
+            if '"station"="subway"' in query:
+                return {"elements": [
+                    {"type": "node", "id": 301, "lat": 55.7577, "lon": 37.6156,
+                     "tags": {"station": "subway", "railway": "station", "name": "Охотный Ряд"}},
+                    {"type": "node", "id": 302, "lat": 55.7566, "lon": 37.6216,
+                     "tags": {"station": "subway", "railway": "station", "name": "Площадь Революции"}},
+                    {"type": "node", "id": 303, "lat": 55.7530, "lon": 37.6110,
+                     "tags": {"highway": "bus_stop", "name": "Александровский сад"}}]}
+            if '"amenity"~"^(cafe|restaurant)$"' in query:
+                return {"elements": [
+                    {"type": "node", "id": 401, "lat": 55.7545, "lon": 37.6210,
+                     "tags": {"amenity": "cafe", "name": "Кофейня у ГУМа", "cuisine": "coffee_shop"}},
+                    {"type": "node", "id": 402, "lat": 55.7560, "lon": 37.6190,
+                     "tags": {"amenity": "restaurant", "name": "Столовая №57", "cuisine": "russian"}}]}
+            if '"place"~"^(city|town|village)$"' in query:
+                return {"elements": []}
+            if "around:" in query or "is_in" in query:
+                return {"elements": []}
+            return URBAN_POIS
+        if host == "ru.wikipedia.org":
+            if params.get("prop") == "pageviews":
+                return pageviews(params)
+            if params.get("generator") == "geosearch":
+                return URBAN_WIKI_GEO
+            return {"query": {"pages": [
+                {"title": "Московский Кремль", "extract": "Московский Кремль — крепость в центре Москвы.",
+                 "fullurl": "https://ru.wikipedia.org/wiki/Московский_Кремль",
+                 "thumbnail": {"source": "https://upload.wikimedia.org/kremlin.jpg"}}]}}
+        if host == "ru.wikivoyage.org":
+            if params.get("list") == "search":
+                hits = [{"title": "Москва"}] if params["srsearch"] == "Москва" else []
+                return {"query": {"search": hits}}
+            if params.get("list") == "geosearch":
+                return {"query": {"geosearch": []}}
+            return {"query": {"pages": [{"title": "Москва", "fullurl": "https://ru.wikivoyage.org/wiki/Москва",
+                                         "extract": "== Как добраться ==\nПоездом до вокзалов.\n"
+                                                    "== Где поесть ==\nСтоловые в центре."}]}}
+        if host == "api.inaturalist.org":
+            raise AssertionError("в городе природу не запрашиваем")
+        return None
+
+
+def pageviews(params):
+    pages = []
+    for title in params["titles"].split("|"):
+        views = PAGEVIEWS.get(title)
+        page = {"title": title}
+        if views is not None:
+            page["pageviews"] = {"2026-10-%02d" % d: views for d in range(1, 31)}
+            page["pageviews"]["2026-10-31"] = None
+        pages.append(page)
+    return {"query": {"pages": pages}}

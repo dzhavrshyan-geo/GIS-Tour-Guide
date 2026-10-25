@@ -47,6 +47,8 @@ def water_litres(hours, temp):
 
 def build(tour):
     """Список разделов [(заголовок, [пункты])] и предупреждения в tour.warnings."""
+    if tour.urban:
+        return build_urban(tour)
     t = tour.totals
     date = datetime.date.fromisoformat(tour.date) if tour.date else datetime.date.today()
     month = date.month
@@ -217,4 +219,94 @@ def build(tour):
         tour.advice[1][1].insert(0, "Прогноза на дату поездки нет — одежда подобрана по сезону "
                                     "(≈ %d…%d °C наверху); проверьте прогноз ближе к выезду."
                                  % (round(tmin), round(tmax)))
+    return tour.advice
+
+
+WEEKDAYS = ["понедельник", "вторник", "среду", "четверг", "пятницу", "субботу", "воскресенье"]
+
+
+def build_urban(tour):
+    """Советы для прогулки по городу: транспорт, билеты, часы работы, еда, одежда по погоде."""
+    t = tour.totals
+    date = datetime.date.fromisoformat(tour.date) if tour.date else datetime.date.today()
+    hours_walk = t.get("hours_walk", 0)
+    hours_total = hours_walk + t.get("hours_stops", 0)
+    stops = [s for s in tour.stops if s.order or s.is_main]
+    categories = {s.category for s in stops}
+    day = trip_weather(tour)
+    if day:
+        tmin, tmax = day["tmin"], day["tmax"]
+        rain = (day.get("precip") or 0) >= 1 or (day.get("precip_prob") or 0) >= 50
+    else:
+        tmax = seasonal_temperature(tour.place.lat, 0, date.month)
+        tmin, rain = tmax - 8, True
+
+    plan, bring, tickets, food, notes = [], [], [], [], []
+    if tour.drive and tour.drive.ok:
+        plan.append("Дорога от %s: %s, около %s; в центре города парковка бывает платной — "
+                    "удобнее оставить машину у метро или на перехватывающей парковке." % (
+                        tour.drive.start_name, fmt_km(tour.drive.distance_m),
+                        fmt_hours(tour.drive.duration_s / 3600)))
+    if tour.transport:
+        kind, name, km = tour.transport[0][:3]
+        plan.append("Начало прогулки — %s «%s» (%s от объекта)." % (kind.lower(), name, fmt_km(km * 1000)))
+    plan.append("Пешком: %s, в пути ~%s, с осмотром ~%s." % (
+        fmt_km(t.get("walk_m", 0)), fmt_hours(hours_walk), fmt_hours(hours_total)))
+    if hours_total > 7:
+        plan.append("Программа больше чем на день — отметьте меньше объектов или разбейте на два дня.")
+    museums = [s for s in stops if s.category in ("museum", "gallery", "zoo")]
+    if museums and date.weekday() == 0:
+        plan.append("Поездка в понедельник — многие музеи в этот день закрыты, проверьте расписание.")
+
+    bring.append("Удобная обувь на плоской подошве — по брусчатке и лестницам.")
+    water = max(0.5, math.ceil(hours_total * (0.25 if tmax < 22 else 0.4) * 2) / 2.0)
+    bring.append("Вода: ~%s л на человека (на группу из %d — %s л)." % (
+        fmt_num(water, 1), max(1, tour.people), fmt_num(water * max(1, tour.people), 1)))
+    if rain:
+        bring.append("Компактный зонт или дождевик.")
+    if tmax >= 22:
+        bring.append("Головной убор, солнцезащитный крем.")
+    if tmin < 5:
+        bring.append("Тёплая куртка, шапка и перчатки — на набережных и площадях ветрено.")
+    bring.append("Заряженный телефон с маршрутом (GPX) и пауэрбанк, банковская карта и немного наличных.")
+    if "worship" in categories:
+        bring.append("Для храмов: закрытые плечи и колени, женщинам — платок.")
+
+    for stop in stops:
+        tags = stop.tags or {}
+        parts = []
+        if tags.get("opening_hours"):
+            parts.append("часы работы: " + tags["opening_hours"])
+        if tags.get("fee") == "yes" or stop.category in ("museum", "gallery", "zoo", "theme_park"):
+            parts.append("вход платный" if tags.get("fee") != "no" else "вход свободный")
+        elif tags.get("fee") == "no":
+            parts.append("вход свободный")
+        if tags.get("website") or tags.get("contact:website"):
+            parts.append("сайт: " + (tags.get("website") or tags.get("contact:website")))
+        if parts:
+            tickets.append("%s — %s." % (stop.name, "; ".join(parts)))
+        elif stop.category in ("museum", "gallery", "zoo", "theatre"):
+            tickets.append("%s — часы работы в OpenStreetMap не указаны, уточните на сайте." % stop.name)
+    if any(s.popularity > 2000 for s in stops):
+        busy = ", ".join(s.name for s in stops if s.popularity > 2000)
+        tickets.append("Очень популярные места (%s): билеты лучше купить онлайн заранее, "
+                       "приходите к открытию — меньше очередей." % busy)
+
+    for name, kind, km in tour.food:
+        food.append("%s — %s, %s от середины маршрута." % (name, kind, fmt_km(km * 1000)))
+    if not food:
+        food.append("Кафе вдоль маршрута в OpenStreetMap не найдены — перекус возьмите с собой.")
+
+    if len(tour.transport) > 1:
+        notes.append("Остановки рядом: " + "; ".join(
+            "%s «%s» — %s" % (kind.lower(), name, fmt_km(km * 1000))
+            for kind, name, km, _ in tour.transport[:5]) + ".")
+    notes.append("Берегите вещи в толпе, фотографируйте по правилам музеев (часто без вспышки).")
+    if day and (day.get("code") or 0) >= 61:
+        notes.append("Ожидается дождь — запасной план: музеи и галереи из списка.")
+
+    sections = [("План дня", plan), ("Что взять", bring), ("Билеты и время работы", tickets),
+                ("Где поесть", food), ("Полезно знать", notes)]
+    tour.advice = [(title, items) for title, items in sections if items]
+    tour.warnings = []
     return tour.advice

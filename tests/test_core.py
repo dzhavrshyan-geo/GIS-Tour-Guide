@@ -15,7 +15,7 @@ import numpy as np
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from gis_tour_guide import geo, net, osm, routing, terrain, text, tsp, wiki  # noqa: E402
-from gis_tour_guide.model import Poi  # noqa: E402
+from gis_tour_guide.model import Poi, Settlement  # noqa: E402
 
 
 class GeoTest(unittest.TestCase):
@@ -117,6 +117,58 @@ class OsmTest(unittest.TestCase):
         self.assertEqual(len(kept), 1)
         self.assertEqual(kept[0].wikidata, "Q5")
         self.assertEqual(kept[0].elevation, 1100)
+
+
+class UrbanAndStartTest(unittest.TestCase):
+
+    def test_urban_categories_need_article(self):
+        self.assertEqual(osm.classify({"amenity": "place_of_worship", "name": "Храм", "wikidata": "Q1"},
+                                      "urban")[0], "worship")
+        self.assertIsNone(osm.classify({"amenity": "place_of_worship", "name": "Храм"}, "urban"))
+        self.assertIsNone(osm.classify({"historic": "memorial", "memorial": "plaque", "name": "Доска",
+                                        "wikidata": "Q2"}, "urban"))
+        self.assertIsNone(osm.classify({"natural": "volcano"}, "urban"))
+        query = osm.poi_query((37.6, 55.7, 37.7, 55.8), "urban")
+        self.assertIn('nwr["historic"]["name"]["wikidata"]', query)
+        self.assertIn('nwr["tourism"~"^(aquarium|attraction|gallery|museum|theme_park|zoo)$"]["name"]', query)
+
+    def test_rank_by_popularity(self):
+        museum = Poi("a", "Музей", 0, 0, score=13, popularity=800)
+        theatre = Poi("b", "Театр", 0, 0, score=10, popularity=1500)
+        cave = Poi("c", "Пещера", 0, 0, score=8)
+        peak = Poi("d", "Вершина", 0, 0, score=6)
+        self.assertEqual([p.name for p in osm.rank([cave, museum, peak, theatre])],
+                         ["Театр", "Музей", "Пещера", "Вершина"])
+
+    def test_pick_start(self):
+        point = (158.03, 52.56)
+        capital = Settlement("Центр", 158.65, 53.02, "city", 160000, "capital")
+        far_big = Settlement("Большой далёкий", 165.0, 60.0, "city", 300000, "major")
+        start, reason = osm.pick_start(capital, [far_big], point)
+        self.assertEqual((start.name, reason), ("Центр", "региональный центр"))
+        near_big = Settlement("Большой рядом", 158.10, 52.60, "city", 250000, "major")
+        small = Settlement("Маленький рядом", 158.04, 52.57, "town", 20000, "major")
+        start, reason = osm.pick_start(capital, [far_big, near_big, small], point)
+        self.assertEqual(start.name, "Большой рядом")
+        self.assertIn("200 тыс", reason)
+        self.assertEqual(osm.pick_start(None, [], point), (None, ""))
+
+    def test_population_and_settlements(self):
+        self.assertEqual(osm.population({"population": "1 234 567"}), 1234567)
+        self.assertEqual(osm.population({"population": "12000;2010"}), 12000)
+        self.assertEqual(osm.population({}), 0)
+
+    def test_popularity_from_pageviews(self):
+        sys.path.insert(0, os.path.dirname(__file__))
+        from fake_services import FakeHttp
+        pois = [Poi("a", "Водопад", 0, 0, wikipedia="ru:Вилючинский водопад"),
+                Poi("b", "Музей", 0, 0, wikidata="Q12"),
+                Poi("c", "Без статьи", 0, 0)]
+        wiki.popularity(FakeHttp(), pois)
+        self.assertAlmostEqual(pois[0].popularity, 300)
+        self.assertEqual(pois[1].wikipedia, "ru:Государственный исторический музей")
+        self.assertAlmostEqual(pois[1].popularity, 800)
+        self.assertEqual(pois[2].popularity, 0)
 
 
 class RoutingTest(unittest.TestCase):

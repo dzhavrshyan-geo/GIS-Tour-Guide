@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 """Данные экскурсии. Координаты — (lon, lat)."""
 
+import math
 from dataclasses import dataclass, field
 
 
@@ -14,6 +15,7 @@ class Place:
     category: str = ""          # ключ категории (volcano, cave…)
     display_name: str = ""
     region: str = ""
+    city: str = ""              # город/посёлок из адреса
     country: str = ""
     country_code: str = ""
     osm_id: str = ""            # node/123
@@ -36,7 +38,8 @@ class Poi:
     lat: float
     category: str = ""
     kind: str = ""
-    score: float = 0.0
+    score: float = 0.0          # интерес по типу объекта
+    popularity: float = 0.0     # просмотров статьи в день (или оценка по Викиданным)
     tags: dict = field(default_factory=dict)
     wikipedia: str = ""
     wikidata: str = ""
@@ -44,17 +47,22 @@ class Poi:
     extract: str = ""           # подробнее
     url: str = ""
     image_url: str = ""
-    image_path: str = ""        # скачанная картинка из Википедии
+    image_data: bytes = None    # картинка из статьи Википедии
     elevation: float = None
     distance_km: float = 0.0    # от главного объекта
     selected: bool = False
     is_main: bool = False
-    order: int = 0              # номер на маршруте (0 — не на маршруте)
+    order: int = 0              # номер на маршруте (0 — старт или не на маршруте)
     photos: list = field(default_factory=list)
 
     @property
     def point(self):
         return (self.lon, self.lat)
+
+    @property
+    def rank(self):
+        """Чем больше — тем популярнее: решают просмотры статьи, тип объекта — при равенстве."""
+        return 10.0 * math.log10(1.0 + self.popularity) + 0.2 * self.score
 
 
 @dataclass
@@ -69,7 +77,10 @@ class Photo:
     license: str = ""
     date: str = ""
     poi_uid: str = ""
-    local_path: str = ""
+    poi_name: str = ""
+    number: int = 0             # номер на карте фотографий и в отчёте
+    data: bytes = None          # миниатюра в памяти
+    local_path: str = ""        # если фотографии сохраняются на диск
     source: str = "Wikimedia Commons"
 
 
@@ -83,8 +94,21 @@ class Observation:
     photo_url: str = ""
     photo_credit: str = ""
     url: str = ""
-    notes: list = field(default_factory=list)   # [(текст, автор, дата, ссылка)]
-    local_path: str = ""
+    data: bytes = None
+
+
+@dataclass
+class Settlement:
+    name: str
+    lon: float
+    lat: float
+    place: str = ""             # city / town / village
+    population: int = 0
+    role: str = "near"          # capital — региональный центр, major — крупный город, near — рядом
+
+    @property
+    def point(self):
+        return (self.lon, self.lat)
 
 
 @dataclass
@@ -125,17 +149,26 @@ class DriveRoute:
 @dataclass
 class Tour:
     place: Place
+    mode: str = "nature"        # nature — природный туризм, urban — городской
     half_km: float = 15.0
     bbox: tuple = None
     region_name: str = ""
+    region_osm_id: int = 0
     region_geojson: dict = None
     region_bbox: tuple = None
-    candidates: list = field(default_factory=list)   # все найденные Poi
+    capital: Settlement = None
+    settlements: list = field(default_factory=list)  # для обзорной карты
+    building_count: int = -1
+    candidates: list = field(default_factory=list)   # [главный объект] + все найденные Poi
     stops: list = field(default_factory=list)        # Poi в порядке обхода (0 — старт)
     legs: list = field(default_factory=list)
     loop: bool = True
     drive: DriveRoute = None
+    start_reason: str = ""
+    transport: list = field(default_factory=list)    # [(вид, название, км, (lon, lat))] — для города
+    food: list = field(default_factory=list)         # [(название, вид, км)]
     profile: list = field(default_factory=list)      # [(метры от старта, высота)]
+    profile_png: bytes = None
     totals: dict = field(default_factory=dict)
     weather: list = field(default_factory=list)      # [{label, elevation, days:[...]}]
     services: dict = field(default_factory=dict)
@@ -150,6 +183,10 @@ class Tour:
     dem_name: str = ""
     date: str = ""                                   # YYYY-MM-DD
     people: int = 2
+
+    @property
+    def urban(self):
+        return self.mode == "urban"
 
     def add_source(self, name, url="", license_=""):
         item = (name, url, license_)

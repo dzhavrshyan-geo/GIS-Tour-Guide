@@ -1,25 +1,29 @@
 # -*- coding: utf-8 -*-
-"""Слои экскурсии в QGIS (GeoPackage + стили), макеты двух карт и их экспорт."""
+"""Слои экскурсии в QGIS (GeoPackage с векторами и растром), фирменные стили и
+три макета: обзорная карта, карта-схема маршрута, карта-схема фотографий.
+"""
 
 import json
 import math
-import os
 import urllib.parse
 
 from qgis.core import (
-    QgsCategorizedSymbolRenderer, QgsCoordinateReferenceSystem, QgsCoordinateTransform,
-    QgsFeature, QgsField, QgsFontMarkerSymbolLayer, QgsGeometry, QgsHillshadeRenderer,
-    QgsLayoutExporter, QgsLayoutFrame, QgsLayoutItemAttributeTable, QgsLayoutItemLabel,
-    QgsLayoutItemLegend, QgsLayoutItemMap, QgsLayoutItemMapOverview, QgsLayoutItemPage, QgsLayoutItemPicture,
-    QgsLayoutItemScaleBar, QgsLayoutPoint, QgsLayoutSize, QgsLineSymbol, QgsMarkerSymbol,
+    QgsCategorizedSymbolRenderer, QgsColorRampShader, QgsCoordinateReferenceSystem,
+    QgsCoordinateTransform, QgsCoordinateTransformContext, QgsFeature, QgsField, QgsFillSymbol,
+    QgsFontMarkerSymbolLayer, QgsGeometry, QgsHillshadeRenderer, QgsLayoutExporter, QgsLayoutFrame,
+    QgsLayoutItemAttributeTable, QgsLayoutItemLabel, QgsLayoutItemLegend, QgsLayoutItemMap,
+    QgsLayoutItemMapOverview, QgsLayoutItemPage, QgsLayoutItemPicture, QgsLayoutItemScaleBar,
+    QgsLayoutItemShape, QgsLayoutMeasurement, QgsLayoutPoint, QgsLayoutSize, QgsLayoutTable,
+    QgsLayoutTableStyle, QgsLegendStyle, QgsMapLayerType, QgsLineSymbol, QgsMarkerLineSymbolLayer, QgsMarkerSymbol,
     QgsPalLayerSettings, QgsPointXY, QgsPrintLayout, QgsProject, QgsProperty, QgsRasterLayer,
-    QgsRectangle, QgsRendererCategory, QgsSymbolLayer, QgsTextBufferSettings, QgsTextFormat,
-    QgsUnitTypes, QgsVectorFileWriter, QgsWkbTypes, QgsCoordinateTransformContext, QgsVectorLayer, QgsVectorLayerSimpleLabeling,
-    QgsFillSymbol, QgsSingleBandPseudoColorRenderer, QgsColorRampShader, QgsRasterShader,
+    QgsRasterShader, QgsRectangle, QgsRendererCategory, QgsSimpleLineSymbolLayer, QgsSimpleMarkerSymbolLayer,
+    QgsSingleBandPseudoColorRenderer, QgsSymbolLayer, QgsTextBufferSettings, QgsTextFormat,
+    QgsUnitTypes, QgsVectorFileWriter, QgsVectorLayer, QgsVectorLayerSimpleLabeling, QgsWkbTypes,
 )
-from qgis.PyQt.QtCore import QVariant
-from qgis.PyQt.QtGui import QColor, QFont
+from qgis.PyQt.QtCore import QSize, QVariant
+from qgis.PyQt.QtGui import QColor, QFont, QPainter
 
+from . import brand
 from .geo import bbox_of, bbox_union
 from .text import fmt_hours, fmt_km
 
@@ -28,11 +32,12 @@ MERCATOR = QgsCoordinateReferenceSystem("EPSG:3857")
 
 BASEMAPS = {
     "topo": ("OpenTopoMap", "https://tile.opentopomap.org/{z}/{x}/{y}.png", 17,
-             "Подложка © OpenTopoMap (CC-BY-SA), данные © участники OpenStreetMap, SRTM"),
+             "подложка © OpenTopoMap (CC-BY-SA), SRTM"),
     "osm": ("OpenStreetMap", "https://tile.openstreetmap.org/{z}/{x}/{y}.png", 19,
-            "Подложка и данные © участники OpenStreetMap"),
+            "подложка © OpenStreetMap"),
+    "light": ("CARTO Light", "https://a.basemaps.cartocdn.com/light_all/{z}/{x}/{y}.png", 19,
+              "подложка © CARTO"),
 }
-GREEN, RED, BLUE, DARK = "#2f5d3a", "#c0392b", "#2c7fb8", "#34495e"
 
 
 def enum(owner, *names):
@@ -88,25 +93,32 @@ def geojson_geometry(value):
         return None
 
 
-def build_layers(tour, folder):
-    """Слои в памяти: {ключ: QgsVectorLayer}."""
+ROLE_LABELS = {"capital": "Региональный центр", "major": "Города региона",
+               "near": "Населённые пункты рядом"}
+
+
+def build_layers(tour):
+    """Векторные слои в памяти: {ключ: QgsVectorLayer}."""
     layers = {}
     stops = []
     for poi in tour.stops:
         stops.append((point(poi.lon, poi.lat), {
             "order": poi.order, "name": poi.name, "kind": poi.kind,
             "elevation": float(poi.elevation) if poi.elevation is not None else None,
-            "is_main": poi.is_main, "description": poi.extract or poi.description,
-            "url": poi.url, "photo": photo_path(poi)}))
+            "is_main": poi.is_main, "popularity": round(poi.popularity, 1),
+            "description": poi.extract or poi.description, "url": poi.url,
+            "image": poi.image_url or (poi.photos[0].thumb_url if poi.photos else "")}))
     layers["stops"] = memory_layer("Point", "Точки маршрута", [
         ("order", int), ("name", str), ("kind", str), ("elevation", float), ("is_main", bool),
-        ("description", str), ("url", str), ("photo", str)], stops)
+        ("popularity", float), ("description", str), ("url", str), ("image", str)], stops)
 
-    others = [(point(p.lon, p.lat), {"name": p.name, "kind": p.kind, "score": float(p.score),
+    others = [(point(p.lon, p.lat), {"name": p.name, "kind": p.kind,
+                                     "popularity": round(p.popularity, 1),
                                      "distance_km": round(p.distance_km, 2), "url": p.url})
               for p in tour.candidates if not p.order and not p.is_main]
     layers["others"] = memory_layer("Point", "Другие объекты рядом", [
-        ("name", str), ("kind", str), ("score", float), ("distance_km", float), ("url", str)], others)
+        ("name", str), ("kind", str), ("popularity", float), ("distance_km", float), ("url", str)],
+        others)
 
     walk = []
     for number, leg in enumerate(tour.legs, 1):
@@ -126,15 +138,22 @@ def build_layers(tour, folder):
             [(line(drive.coords), {"start": drive.start_name,
                                    "length_km": round(drive.distance_m / 1000, 1),
                                    "hours": round(drive.duration_s / 3600, 2)})])
+    if drive and drive.start:
         layers["town"] = memory_layer("Point", "Откуда едем", [("name", str)],
                                       [(point(*drive.start), {"name": drive.start_name})])
 
     layers["object"] = memory_layer("Point", "Объект экскурсии", [("name", str), ("kind", str)], [
         (point(tour.place.lon, tour.place.lat), {"name": tour.place.name, "kind": tour.place.kind})])
 
+    if tour.settlements:
+        layers["settlements"] = memory_layer("Point", "Населённые пункты", [
+            ("name", str), ("role", str), ("place", str), ("population", int)],
+            [(point(s.lon, s.lat), {"name": s.name, "role": s.role, "place": s.place,
+                                    "population": s.population}) for s in tour.settlements])
+
     west, south, east, north = tour.bbox
     zone = QgsGeometry.fromRect(QgsRectangle(west, south, east, north))
-    layers["zone"] = memory_layer("Polygon", "Зона поиска ±%d км" % tour.half_km,
+    layers["zone"] = memory_layer("Polygon", "Зона поиска ±%s км" % ("%g" % tour.half_km),
                                   [("half_km", float)], [(zone, {"half_km": float(tour.half_km)})])
     if tour.region_geojson:
         geometry = geojson_geometry(tour.region_geojson)
@@ -142,28 +161,20 @@ def build_layers(tour, folder):
             layers["region"] = memory_layer("MultiPolygon", tour.region_name or "Регион",
                                             [("name", str)], [(geometry, {"name": tour.region_name})])
 
-    photos = [(point(p.lon, p.lat), {"title": p.title, "description": p.description,
-                                     "author": p.author, "license": p.license,
-                                     "photo": p.local_path, "page": p.page_url})
-              for p in tour.photos if p.lon is not None and p.local_path]
+    photos = [(point(p.lon, p.lat), {"number": p.number, "object": p.poi_name, "title": p.title,
+                                     "description": p.description, "author": p.author,
+                                     "license": p.license, "image": p.local_path or p.thumb_url,
+                                     "page": p.page_url})
+              for p in tour.photos if p.lon is not None]
     if photos:
-        layers["photos"] = memory_layer("Point", "Фотографии (Викисклад)", [
-            ("title", str), ("description", str), ("author", str), ("license", str),
-            ("photo", str), ("page", str)], photos)
+        layers["photos"] = memory_layer("Point", "Фотографии", [
+            ("number", int), ("object", str), ("title", str), ("description", str), ("author", str),
+            ("license", str), ("image", str), ("page", str)], photos)
     return layers
 
 
-def photo_path(poi):
-    if poi.image_path:
-        return poi.image_path
-    for photo in poi.photos:
-        if photo.local_path:
-            return photo.local_path
-    return ""
-
-
-def save_gpkg(layers, path, log=None):
-    """Слои из памяти → GeoPackage; возвращает {ключ: слой из файла}."""
+def save_gpkg(layers, path, dem_grid=None, log=None):
+    """Векторы и растр рельефа → один GeoPackage. Возвращает {ключ: слой из файла}."""
     saved = {}
     first = True
     for key, layer in layers.items():
@@ -175,66 +186,89 @@ def save_gpkg(layers, path, log=None):
                                         else QgsVectorFileWriter.CreateOrOverwriteLayer)
         result = QgsVectorFileWriter.writeAsVectorFormatV3(
             layer, path, QgsCoordinateTransformContext(), options)
-        error = result[0]
-        if error != QgsVectorFileWriter.NoError:
+        if result[0] != QgsVectorFileWriter.NoError:
             if log:
                 log("⚠ Не записан слой %s: %s" % (key, result[1]))
             saved[key] = layer
             continue
         first = False
+    if dem_grid is not None:
+        try:
+            write_dem(dem_grid, path)
+        except Exception as error:  # noqa: BLE001 - без рельефа карта всё равно будет
+            if log:
+                log("⚠ Рельеф не записан в GeoPackage: %s" % error)
+            dem_grid = None
+    for key, layer in layers.items():
+        if key in saved:
+            continue
         loaded = QgsVectorLayer("%s|layername=%s" % (path, key), layer.name(), "ogr")
         saved[key] = loaded if loaded.isValid() else layer
+    if dem_grid is not None:
+        raster = QgsRasterLayer("GPKG:%s:dem" % path, "Рельеф (ЦМР)", "gdal")
+        if raster.isValid():
+            saved["dem"] = raster
     return saved
 
 
-def write_dem(grid, path):
-    """ElevationGrid → GeoTIFF (EPSG:4326)."""
+def write_dem(grid, gpkg_path):
+    """ElevationGrid → растровая таблица «dem» в GeoPackage (Float32, тайлы TIFF)."""
     import numpy as np
     from osgeo import gdal, osr
-    driver = gdal.GetDriverByName("GTiff")
-    data = driver.Create(path, grid.cols, grid.rows, 1, gdal.GDT_Float32, ["COMPRESS=DEFLATE"])
-    data.SetGeoTransform([grid.west, grid.step_lon, 0, grid.north, 0, -grid.step_lat])
+    memory = gdal.GetDriverByName("MEM").Create("", grid.cols, grid.rows, 1, gdal.GDT_Float32)
+    memory.SetGeoTransform([grid.west, grid.step_lon, 0, grid.north, 0, -grid.step_lat])
     srs = osr.SpatialReference()
     srs.ImportFromEPSG(4326)
-    data.SetProjection(srs.ExportToWkt())
-    band = data.GetRasterBand(1)
-    values = np.where(np.isnan(grid.values), -32768, grid.values).astype(np.float32)
-    band.WriteArray(values)
+    memory.SetProjection(srs.ExportToWkt())
+    band = memory.GetRasterBand(1)
+    band.WriteArray(np.where(np.isnan(grid.values), -32768, grid.values).astype(np.float32))
     band.SetNoDataValue(-32768)
-    data.FlushCache()
-    data = None
-    return path
+    gdal.Translate(gpkg_path, memory, format="GPKG", creationOptions=[
+        "RASTER_TABLE=dem", "APPEND_SUBDATASET=YES", "TILE_FORMAT=TIFF",
+        "RASTER_IDENTIFIER=Рельеф (ЦМР)"])
+    memory = None
+    return gpkg_path
 
 
 # --- Стили ---
 
-def text_format(size=9, color="#1d2a22", bold=False, buffer_=True):
+def text_format(size=9, color=brand.INK, bold=False, buffer_=True, italic=False):
     fmt = QgsTextFormat()
-    font = QFont("Arial")
+    font = QFont(brand.FONT)
     font.setBold(bold)
+    font.setItalic(italic)
     fmt.setFont(font)
     fmt.setSize(size)
     fmt.setColor(QColor(color))
     if buffer_:
         buf = QgsTextBufferSettings()
         buf.setEnabled(True)
-        buf.setSize(0.9)
-        buf.setColor(QColor(255, 255, 255, 230))
+        buf.setSize(1.0)
+        buf.setColor(QColor(255, 255, 255, 235))
         fmt.setBuffer(buf)
     return fmt
 
 
-def set_labels(layer, field_or_expression, size=9, color="#1d2a22", bold=False, is_expression=False,
-               distance=1.6):
+def set_labels(layer, field, size=9, color=brand.INK, bold=False, distance=1.8, italic=False,
+               expression=False, dd_size=None, dd_bold=None):
     settings = QgsPalLayerSettings()
-    settings.fieldName = field_or_expression
-    settings.isExpression = is_expression
-    settings.setFormat(text_format(size, color, bold))
+    settings.fieldName = field
+    settings.isExpression = expression
+    settings.setFormat(text_format(size, color, bold, italic=italic))
     if layer.geometryType() == enum(QgsWkbTypes, "PointGeometry", "GeometryType.Point"):
-        settings.placement = enum(QgsPalLayerSettings, "AroundPoint", "Placement.AroundPoint")
+        settings.placement = enum(QgsPalLayerSettings, "OrderedPositionsAroundPoint",
+                                  "Placement.OrderedPositionsAroundPoint", "AroundPoint")
         settings.dist = distance
     else:
         settings.placement = enum(QgsPalLayerSettings, "Line", "Placement.Line")
+    properties = settings.dataDefinedProperties()
+    if dd_size:
+        properties.setProperty(enum(QgsPalLayerSettings, "Size", "Property.Size"),
+                               QgsProperty.fromExpression(dd_size))
+    if dd_bold:
+        properties.setProperty(enum(QgsPalLayerSettings, "Bold", "Property.Bold"),
+                               QgsProperty.fromExpression(dd_bold))
+    settings.setDataDefinedProperties(properties)
     layer.setLabeling(QgsVectorLayerSimpleLabeling(settings))
     layer.setLabelsEnabled(True)
 
@@ -243,95 +277,148 @@ def symbol_property(name):
     return enum(QgsSymbolLayer, "Property." + name, "Property" + name)
 
 
-def style_stops(layer):
+def numbered_marker(fill, size, field_expression, halo=1.2, font_size=None):
+    """Кружок с белой каймой и номером внутри (номер берётся из выражения)."""
     symbol = QgsMarkerSymbol.createSimple({
-        "name": "circle", "color": GREEN, "outline_color": "white", "outline_width": "0.5",
-        "size": "6.2"})
-    symbol.symbolLayer(0).setDataDefinedProperty(symbol_property("FillColor"), QgsProperty.fromExpression(
-        "if(\"is_main\", '%s', if(\"order\" = 0, '%s', '%s'))" % (RED, DARK, GREEN)))
-    number = QgsFontMarkerSymbolLayer("Arial", "1", 3.4, QColor("white"))
+        "name": "circle", "color": "white", "outline_style": "no", "size": str(size + halo)})
+    inner = QgsSimpleMarkerSymbolLayer.create({
+        "name": "circle", "color": fill, "outline_style": "no", "size": str(size)})
+    symbol.appendSymbolLayer(inner)
+    number = QgsFontMarkerSymbolLayer(brand.FONT, "1", font_size or size * 0.55, QColor("white"))
     number.setFontStyle("Bold")
-    number.setDataDefinedProperty(symbol_property("Character"), QgsProperty.fromExpression(
-        "if(\"order\" = 0, 'С', to_string(\"order\"))"))
+    number.setDataDefinedProperty(symbol_property("Character"), QgsProperty.fromExpression(field_expression))
     symbol.appendSymbolLayer(number)
+    return symbol, inner
+
+
+def style_stops(layer):
+    symbol, inner = numbered_marker(brand.GREEN, 6.0, "if(\"order\" = 0, 'С', to_string(\"order\"))")
+    inner.setDataDefinedProperty(symbol_property("FillColor"), QgsProperty.fromExpression(
+        "if(\"is_main\", '%s', if(\"order\" = 0, '%s', '%s'))" % (brand.PIN, brand.SLATE, brand.GREEN)))
     layer.renderer().setSymbol(symbol)
-    set_labels(layer, "name", 9, "#1d2a22", True, distance=2.2)
+    set_labels(layer, "name", 8.5, brand.GREEN_DARK, True, distance=2.4)
     layer.setMapTipTemplate(
-        "<b>[% if(\"order\"=0,'Старт',to_string(\"order\")) %]. [% \"name\" %]</b><br>"
-        "<i>[% \"kind\" %]</i>[% if(\"elevation\" is not null, ', ' || round(\"elevation\") || ' м', '') %]<br>"
-        "[% if(\"photo\" <> '', '<img src=\"file:///' || replace(\"photo\", '\\\\', '/') || "
-        "'\" width=\"300\"><br>', '') %][% left(\"description\", 600) %]")
+        "<b style='color:%s'>[%% if(\"order\"=0,'Старт',to_string(\"order\")) %%]. [%% \"name\" %%]</b><br>"
+        "<i>[%% \"kind\" %%]</i><br>"
+        "[%% if(\"image\" <> '', '<img src=\"' || \"image\" || '\" width=\"300\"><br>', '') %%]"
+        "[%% left(\"description\", 600) %%]" % brand.GREEN)
 
 
 def style_object(layer):
     symbol = QgsMarkerSymbol.createSimple({
-        "name": "star", "color": RED, "outline_color": "white", "outline_width": "0.5", "size": "7"})
+        "name": "star", "color": brand.PIN, "outline_color": "white", "outline_width": "0.6",
+        "size": "8"})
     layer.renderer().setSymbol(symbol)
-    set_labels(layer, "name", 10, RED, True, distance=2.5)
+    set_labels(layer, "name", 10, brand.PIN, True, distance=2.8)
 
 
 def style_others(layer):
     layer.renderer().setSymbol(QgsMarkerSymbol.createSimple({
-        "name": "circle", "color": "#ffffff", "outline_color": "#7f8c8d", "outline_width": "0.4",
+        "name": "circle", "color": "white", "outline_color": "#8a978e", "outline_width": "0.4",
         "size": "2.4"}))
-    set_labels(layer, "name", 7, "#5d6d64")
+    set_labels(layer, "name", 6.5, "#5d6d64", italic=True)
 
 
-def style_walk(layer):
-    trail = QgsLineSymbol.createSimple({"line_color": "#d35400", "line_width": "0.9",
-                                        "capstyle": "round", "joinstyle": "round"})
-    offtrail = QgsLineSymbol.createSimple({"line_color": "#8e44ad", "line_width": "0.8",
-                                           "line_style": "dash", "capstyle": "round"})
-    layer.setRenderer(QgsCategorizedSymbolRenderer("kind", [
-        QgsRendererCategory("trail", trail, "по дорогам и тропам"),
-        QgsRendererCategory("offtrail", offtrail, "без троп, по рельефу"),
-    ]))
+def casing_line(color, width, casing=0.9, dash=None):
+    symbol = QgsLineSymbol.createSimple({"line_color": "white", "line_width": str(width + casing),
+                                         "capstyle": "round", "joinstyle": "round"})
+    props = {"line_color": color, "line_width": str(width), "capstyle": "round", "joinstyle": "round"}
+    if dash:
+        props.update({"use_custom_dash": "1", "customdash": dash, "customdash_unit": "MM"})
+    symbol.appendSymbolLayer(QgsSimpleLineSymbolLayer.create(props))
+    return symbol
+
+
+def add_arrows(symbol, color, interval=22):
+    arrows = QgsMarkerLineSymbolLayer.create({"interval": str(interval), "placement": "interval",
+                                             "rotate": "1", "offset_along_line": str(interval / 2)})
+    arrows.setSubSymbol(QgsMarkerSymbol.createSimple({
+        "name": "filled_arrowhead", "color": color, "outline_color": "white",
+        "outline_width": "0.2", "size": "2.6"}))
+    symbol.appendSymbolLayer(arrows)
+    return symbol
+
+
+def style_walk(layer, urban=False):
+    kinds = {f["kind"] for f in layer.getFeatures()} or {"trail"}
+    categories = []
+    if "trail" in kinds:
+        categories.append(QgsRendererCategory(
+            "trail", add_arrows(casing_line(brand.ROUTE, 1.0), brand.ROUTE),
+            "по улицам" if urban else "по дорогам и тропам"))
+    if "offtrail" in kinds:
+        categories.append(QgsRendererCategory(
+            "offtrail", add_arrows(casing_line(brand.ROUTE, 0.9, dash="2.6;1.6"), brand.ROUTE),
+            "без троп, по рельефу"))
+    layer.setRenderer(QgsCategorizedSymbolRenderer("kind", categories))
 
 
 def style_drive(layer):
-    layer.renderer().setSymbol(QgsLineSymbol.createSimple({
-        "line_color": BLUE, "line_width": "1.1", "capstyle": "round", "joinstyle": "round"}))
+    layer.renderer().setSymbol(casing_line(brand.DRIVE, 1.2, casing=1.0))
 
 
 def style_town(layer):
     layer.renderer().setSymbol(QgsMarkerSymbol.createSimple({
-        "name": "square", "color": BLUE, "outline_color": "white", "size": "4"}))
-    set_labels(layer, "name", 9, BLUE, True)
+        "name": "circle", "color": "0,0,0,0", "outline_color": brand.DRIVE, "outline_width": "0.8",
+        "size": "4.6"}))
+
+
+def style_settlements(layer):
+    capital = QgsMarkerSymbol.createSimple({
+        "name": "square", "color": brand.GREEN_DARK, "outline_color": "white", "outline_width": "0.5",
+        "size": "3.6"})
+    capital.appendSymbolLayer(QgsSimpleMarkerSymbolLayer.create({
+        "name": "circle", "color": "white", "outline_style": "no", "size": "1.2"}))
+    major = QgsMarkerSymbol.createSimple({
+        "name": "circle", "color": "white", "outline_color": brand.GREEN_DARK, "outline_width": "0.6",
+        "size": "2.6"})
+    near = QgsMarkerSymbol.createSimple({
+        "name": "circle", "color": brand.SLATE, "outline_color": "white", "outline_width": "0.3",
+        "size": "1.9"})
+    layer.setRenderer(QgsCategorizedSymbolRenderer("role", [
+        QgsRendererCategory("capital", capital, ROLE_LABELS["capital"]),
+        QgsRendererCategory("major", major, ROLE_LABELS["major"]),
+        QgsRendererCategory("near", near, ROLE_LABELS["near"]),
+    ]))
+    set_labels(layer, "name", 7.5, brand.INK, distance=1.4,
+               dd_size="CASE WHEN \"role\" = 'capital' THEN 10 WHEN \"role\" = 'major' THEN 8 ELSE 7 END",
+               dd_bold="\"role\" = 'capital'")
 
 
 def style_zone(layer):
     layer.renderer().setSymbol(QgsFillSymbol.createSimple({
-        "color": "0,0,0,0", "outline_color": "#555555", "outline_width": "0.5",
+        "color": "0,0,0,0", "outline_color": brand.GREEN, "outline_width": "0.5",
         "outline_style": "dash"}))
 
 
 def style_region(layer):
     layer.renderer().setSymbol(QgsFillSymbol.createSimple({
-        "color": "255,255,255,40", "outline_color": "#4d4d4d", "outline_width": "0.6"}))
+        "color": "255,255,255,50", "outline_color": brand.GREEN_DARK, "outline_width": "0.7"}))
 
 
 def style_photos(layer):
-    layer.renderer().setSymbol(QgsMarkerSymbol.createSimple({
-        "name": "triangle", "color": "#f39c12", "outline_color": "white", "size": "2.8"}))
+    symbol, _ = numbered_marker(brand.PHOTO, 4.6, "to_string(\"number\")", halo=1.0, font_size=2.6)
+    layer.renderer().setSymbol(symbol)
     layer.setMapTipTemplate(
-        "[% if(\"photo\" <> '', '<img src=\"file:///' || replace(\"photo\", '\\\\', '/') || "
-        "'\" width=\"320\"><br>', '') %][% left(\"description\", 300) %]<br>"
-        "<small>© [% \"author\" %], [% \"license\" %]</small>")
+        "<b>Фото [% \"number\" %] · [% \"object\" %]</b><br>"
+        "[% if(\"image\" <> '', '<img src=\"' || \"image\" || '\" width=\"320\"><br>', '') %]"
+        "[% left(\"description\", 300) %]<br><small>© [% \"author\" %], [% \"license\" %]</small>")
 
 
 def style_dem(layer, kind):
     provider = layer.dataProvider()
     if kind == "hillshade":
         renderer = QgsHillshadeRenderer(provider, 1, 315, 45)
-        renderer.setZFactor(1.5)
+        renderer.setZFactor(1.6)
         layer.setRenderer(renderer)
-        layer.renderer().setOpacity(0.55)
+        layer.setBlendMode(QPainter.CompositionMode.CompositionMode_Multiply)
+        layer.renderer().setOpacity(0.6)
         return
     stats = provider.bandStatistics(1)
     low, high = stats.minimumValue, stats.maximumValue
     shader = QgsColorRampShader(low, high)
     shader.setColorRampType(enum(QgsColorRampShader, "Interpolated", "Type.Interpolated"))
-    colors = ["#6aa86a", "#b5cf8a", "#e8dfa0", "#c9a477", "#a07858", "#ffffff"]
+    colors = ["#dfe9d3", "#c9dbb4", "#e8dfa0", "#d9c48e", "#c2a27a", "#f4f1ea"]
     shader.setColorRampItemList([QgsColorRampShader.ColorRampItem(
         low + (high - low) * i / (len(colors) - 1), QColor(c)) for i, c in enumerate(colors)])
     raster_shader = QgsRasterShader()
@@ -339,21 +426,23 @@ def style_dem(layer, kind):
     layer.setRenderer(QgsSingleBandPseudoColorRenderer(provider, 1, raster_shader))
 
 
-STYLES = {"stops": style_stops, "object": style_object, "others": style_others,
-          "walk": style_walk, "drive": style_drive, "town": style_town, "zone": style_zone,
-          "region": style_region, "photos": style_photos}
-ORDER = ["stops", "object", "photos", "others", "walk", "drive", "town", "zone", "region"]
+VECTOR_ORDER = ["stops", "photos", "object", "others", "settlements", "town", "walk", "drive",
+                "zone", "region"]
 
 
 def basemap_layer(key):
     name, url, zmax, _ = BASEMAPS[key]
     uri = "type=xyz&url=%s&zmax=%d&zmin=0" % (urllib.parse.quote(url, safe=":/"), zmax)
-    layer = QgsRasterLayer(uri, name, "wms")
+    layer = QgsRasterLayer(uri, "Подложка: " + name, "wms")
     return layer if layer.isValid() else None
 
 
-def add_to_project(tour, layers, dem_path=None, basemap="topo", project=None):
-    """Группа «Экскурсия: …» со слоями. Возвращает (группа, {ключ: слой})."""
+def overview_basemap(basemap):
+    return basemap if basemap in BASEMAPS else "light"
+
+
+def add_to_project(tour, layers, basemap="topo", project=None):
+    """Группа «Экскурсия: …» с подгруппами «Векторные данные» и «Растры и подложки»."""
     project = project or QgsProject.instance()
     root = project.layerTreeRoot()
     title = "Экскурсия: %s" % tour.place.name
@@ -363,37 +452,54 @@ def add_to_project(tour, layers, dem_path=None, basemap="topo", project=None):
             project.removeMapLayer(layer.layerId())
         root.removeChildNode(old)
     group = root.insertGroup(0, title)
+    vectors = group.addGroup("Векторные данные")
+    rasters = group.addGroup("Растры и подложки")
+    styles = {"stops": style_stops, "object": style_object, "others": style_others,
+              "walk": lambda layer: style_walk(layer, tour.urban), "drive": style_drive,
+              "town": style_town, "settlements": style_settlements, "zone": style_zone,
+              "region": style_region, "photos": style_photos}
     added = {}
-    for key in ORDER:
+    for key in VECTOR_ORDER:
         layer = layers.get(key)
         if layer is None:
             continue
-        STYLES[key](layer)
+        styles[key](layer)
         project.addMapLayer(layer, False)
-        group.addLayer(layer)
+        node = vectors.addLayer(layer)
         added[key] = layer
-    if dem_path and os.path.exists(dem_path):
-        for kind, name in (("hillshade", "Отмывка рельефа"), ("hypsometry", "Высоты (ЦМР)")):
-            raster = QgsRasterLayer(dem_path, name)
+        if key in ("object", "settlements", "town", "drive", "region"):
+            node.setItemVisibilityChecked(False)    # для обзорной карты; на канве — схема
+    dem = layers.get("dem")
+    if dem is not None:
+        hillshade = QgsRasterLayer(dem.source(), "Отмывка рельефа", "gdal")
+        for kind, raster in (("hillshade", hillshade), ("hypsometry", dem)):
             if raster.isValid():
                 style_dem(raster, kind)
                 project.addMapLayer(raster, False)
-                node = group.addLayer(raster)
+                node = rasters.addLayer(raster)
                 added[kind] = raster
                 if basemap != "relief":
                     node.setItemVisibilityChecked(False)
-    if basemap in BASEMAPS:
-        base = basemap_layer(basemap)
-        if base:
-            project.addMapLayer(base, False)
-            group.addLayer(base)
-            added["basemap"] = base
+    for key in dict.fromkeys([basemap, overview_basemap(basemap)]):
+        if key in BASEMAPS:
+            base = basemap_layer(key)
+            if base:
+                project.addMapLayer(base, False)
+                node = rasters.addLayer(base)
+                added["basemap:" + key] = base
+                if key != basemap:
+                    node.setItemVisibilityChecked(False)
     if not project.crs().isValid() or len(project.mapLayers()) == len(added):
         project.setCrs(MERCATOR)
     return group, added
 
 
-# --- Макеты ---
+# --- Макеты: фирменная рамка ---
+
+PAGE_W, PAGE_H = 297.0, 210.0
+MAP_X, MAP_Y, MAP_W, MAP_H = 8.0, 25.5, 197.0, 166.0
+PANEL_X, PANEL_W = 209.0, 80.0
+
 
 def mercator_rect(bbox, project):
     transform = QgsCoordinateTransform(WGS84, MERCATOR, project)
@@ -415,19 +521,41 @@ def fit_aspect(rect, width, height, margin=0.06):
     return rect
 
 
-def add_label(layout, text, x, y, w, h, size, bold=False, color="#1d2a22"):
+def place_item(layout, item, x, y, w=None, h=None):
+    item.attemptMove(QgsLayoutPoint(x, y))
+    if w is not None:
+        item.attemptResize(QgsLayoutSize(w, h))
+    layout.addLayoutItem(item)
+    return item
+
+
+def add_label(layout, text, x, y, w, h, size, bold=False, color=brand.INK, align_right=False,
+              italic=False):
     item = QgsLayoutItemLabel(layout)
     item.setText(text)
-    fmt = text_format(size, color, bold, buffer_=False)
+    fmt = text_format(size, color, bold, buffer_=False, italic=italic)
     if hasattr(item, "setTextFormat"):
         item.setTextFormat(fmt)
     else:
         item.setFont(fmt.toQFont())
         item.setFontColor(QColor(color))
-    item.attemptMove(QgsLayoutPoint(x, y))
-    item.attemptResize(QgsLayoutSize(w, h))
-    layout.addLayoutItem(item)
-    return item
+    if align_right:
+        from qgis.PyQt.QtCore import Qt
+        item.setHAlign(Qt.AlignmentFlag.AlignRight)
+    return place_item(layout, item, x, y, w, h)
+
+
+def add_rect(layout, x, y, w, h, fill, stroke=None, radius=0.0, stroke_width=0.3):
+    shape = QgsLayoutItemShape(layout)
+    shape.setShapeType(enum(QgsLayoutItemShape, "Rectangle", "Shape.Rectangle"))
+    props = {"color": fill, "outline_style": "no"}
+    if stroke:
+        props.update({"outline_style": "solid", "outline_color": stroke,
+                      "outline_width": str(stroke_width)})
+    shape.setSymbol(QgsFillSymbol.createSimple(props))
+    if radius:
+        shape.setCornerRadius(QgsLayoutMeasurement(radius))
+    return place_item(layout, shape, x, y, w, h)
 
 
 def new_layout(project, name):
@@ -444,7 +572,31 @@ def new_layout(project, name):
     return layout
 
 
-def add_map(layout, layers, rect_3857, x, y, w, h):
+def frame(layout, title, subtitle, sheet, attribution_):
+    """Шапка с логотипом, оранжевая полоса маршрута, подложка панели, подвал."""
+    add_rect(layout, 0, 0, PAGE_W, 20.5, brand.GREEN)
+    add_rect(layout, 0, 20.5, PAGE_W, 1.1, brand.ROUTE)
+    logo = QgsLayoutItemPicture(layout)
+    logo.setPicturePath(brand.ICON)
+    place_item(layout, logo, 6.5, 3.2, 14.5, 14.5)
+    add_label(layout, title, 25, 2.6, 190, 10, 16.5, True, "white")
+    add_label(layout, subtitle, 25, 12.2, 200, 6, 8.5, False, brand.SAND)
+    add_label(layout, sheet.upper(), 200, 4, 90, 6, 7.5, True, "white", align_right=True)
+    add_label(layout, brand.NAME + " · QGIS", 200, 11, 90, 6, 7.5, False, brand.SAND, align_right=True)
+    add_rect(layout, PANEL_X, MAP_Y, PANEL_W, MAP_H, "white", brand.LINE, radius=2.5)
+    add_rect(layout, 0, PAGE_H - 13.5, PAGE_W, 13.5, brand.SAND_SOFT)
+    add_rect(layout, 0, PAGE_H - 13.5, PAGE_W, 0.5, brand.SAND)
+    add_label(layout, attribution_, 8, PAGE_H - 10.5, 235, 8, 6.5, False, brand.MUTED)
+    add_label(layout, "Данные собраны автоматически — сверяйтесь с местностью", 190, PAGE_H - 10.5,
+              99, 8, 6.5, False, brand.GREEN_DARK, align_right=True, italic=True)
+
+
+def panel_heading(layout, text, y):
+    add_label(layout, text.upper(), PANEL_X + 4, y, PANEL_W - 8, 6, 8.5, True, brand.GREEN)
+    add_rect(layout, PANEL_X + 4, y + 5.6, 18, 0.6, brand.ROUTE)
+
+
+def add_map(layout, layers, rect_3857, x=MAP_X, y=MAP_Y, w=MAP_W, h=MAP_H, background=brand.PAPER):
     item = QgsLayoutItemMap(layout)
     item.attemptMove(QgsLayoutPoint(x, y))
     item.attemptResize(QgsLayoutSize(w, h))
@@ -452,27 +604,59 @@ def add_map(layout, layers, rect_3857, x, y, w, h):
     item.setLayers(layers)
     item.setKeepLayerSet(True)
     item.setFrameEnabled(True)
+    item.setFrameStrokeColor(QColor(brand.GREEN))
+    item.setFrameStrokeWidth(QgsLayoutMeasurement(0.4))
+    item.setBackgroundColor(QColor(background))
     layout.addLayoutItem(item)
     item.setExtent(fit_aspect(rect_3857, w, h))
     return item
 
 
-def add_legend(layout, map_item, layers, x, y, w=None):
+def style_legend(legend):
+    group = text_format(8, brand.GREEN_DARK, True, buffer_=False)
+    item = text_format(7.5, brand.INK, buffer_=False)
+    for style, fmt in ((enum(QgsLegendStyle, "Group", "Style.Group"), group),
+                       (enum(QgsLegendStyle, "Subgroup", "Style.Subgroup"), group),
+                       (enum(QgsLegendStyle, "SymbolLabel", "Style.SymbolLabel"), item)):
+        if hasattr(legend, "rstyle") and hasattr(legend.rstyle(style), "setTextFormat"):
+            legend.rstyle(style).setTextFormat(fmt)
+        else:
+            legend.setStyleFont(style, fmt.toQFont())
+    legend.setSymbolWidth(7)
+    legend.setSymbolHeight(3.6)
+
+
+def add_legend(layout, map_item, layers, x, y):
     legend = QgsLayoutItemLegend(layout)
-    legend.setTitle("Условные обозначения")
+    legend.setTitle("")
     legend.setLinkedMap(map_item)
     legend.setAutoUpdateModel(False)
     root = legend.model().rootGroup()
     root.clear()
     for layer in layers:
         root.addLayer(layer)
-    legend.setBackgroundEnabled(True)
-    legend.setBackgroundColor(QColor(255, 255, 255, 225))
-    legend.setFrameEnabled(True)
+    legend.setBackgroundEnabled(False)
+    legend.setFrameEnabled(False)
+    style_legend(legend)
     legend.attemptMove(QgsLayoutPoint(x, y))
     layout.addLayoutItem(legend)
     legend.adjustBoxSize()
     return legend
+
+
+def legend_height(layers):
+    """Высота легенды, мм. QGIS считает её сам только при отрисовке — оцениваем заранее."""
+    height = 0.0
+    for layer in layers:
+        renderer = layer.renderer() if hasattr(layer, "renderer") else None
+        if isinstance(renderer, QgsCategorizedSymbolRenderer):
+            height += 7.0 + 6.3 * len(renderer.categories())
+        elif layer.type() == enum(QgsMapLayerType, "VectorLayer", "Vector") and \
+                layer.geometryType() == enum(QgsWkbTypes, "PointGeometry", "GeometryType.Point"):
+            height += 8.6
+        else:
+            height += 6.6
+    return height + 3.0
 
 
 def add_scalebar(layout, map_item, x, y):
@@ -486,8 +670,19 @@ def add_scalebar(layout, map_item, x, y):
     width_km = map_item.extent().width() / 1000.0 * math.cos(math.radians(
         mercator_lat(map_item.extent().center().y())))
     bar.setUnitsPerSegment(nice_step(width_km / 12))
+    bar.setHeight(1.8)
+    if hasattr(bar, "setTextFormat"):
+        bar.setTextFormat(text_format(7, brand.INK, buffer_=False))
+    if hasattr(bar, "setFillSymbol"):      # QGIS 3.20+
+        bar.setFillSymbol(QgsFillSymbol.createSimple({"color": brand.GREEN, "outline_style": "no"}))
+        bar.setAlternateFillSymbol(QgsFillSymbol.createSimple({"color": "white", "outline_style": "no"}))
+        bar.setLineSymbol(QgsLineSymbol.createSimple({"line_color": brand.GREEN, "line_width": "0.3"}))
+    else:
+        bar.setFillColor(QColor(brand.GREEN))
+        bar.setFillColor2(QColor("white"))
+        bar.setLineColor(QColor(brand.GREEN))
     bar.setBackgroundEnabled(True)
-    bar.setBackgroundColor(QColor(255, 255, 255, 210))
+    bar.setBackgroundColor(QColor(255, 255, 255, 215))
     bar.attemptMove(QgsLayoutPoint(x, y))
     layout.addLayoutItem(bar)
     bar.update()
@@ -508,45 +703,59 @@ def nice_step(value):
     return 10 * power
 
 
-def add_north(layout, map_item, x, y, size=14):
+def add_north(layout, map_item, x, y, size=11):
+    add_rect(layout, x - 1, y - 1, size + 2, size + 2, "255,255,255,215", brand.LINE, radius=1.5)
     picture = QgsLayoutItemPicture(layout)
     picture.setPicturePath(":/images/north_arrows/layout_default_north_arrow.svg")
     picture.setLinkedMap(map_item)
-    picture.attemptMove(QgsLayoutPoint(x, y))
-    picture.attemptResize(QgsLayoutSize(size, size))
-    picture.setBackgroundEnabled(True)
-    picture.setBackgroundColor(QColor(255, 255, 255, 190))
-    layout.addLayoutItem(picture)
-    return picture
+    if hasattr(picture, "setSvgFillColor"):
+        picture.setSvgFillColor(QColor(brand.GREEN))
+        picture.setSvgStrokeColor(QColor(brand.GREEN_DARK))
+    return place_item(layout, picture, x, y, size, size)
 
 
-def add_stops_table(layout, layer, x, y, w, h):
+def add_table(layout, layer, fields, headings, widths, x, y, w, h, max_rows=40):
     table = QgsLayoutItemAttributeTable.create(layout)
     table.setVectorLayer(layer)
-    table.setDisplayedFields(["order", "name", "kind"])
+    table.setDisplayedFields(fields)
     columns = table.columns()
-    for column, heading in zip(columns, ("№", "Объект", "Тип")):
+    for column, heading, width in zip(columns, headings, widths):
         column.setHeading(heading)
+        column.setWidth(width)
     table.setColumns(columns)
     if hasattr(table, "setContentTextFormat"):
-        table.setContentTextFormat(text_format(7, buffer_=False))
-        table.setHeaderTextFormat(text_format(7, bold=True, buffer_=False))
-    table.setMaximumNumberOfFeatures(40)
+        table.setContentTextFormat(text_format(6.8, buffer_=False))
+        table.setHeaderTextFormat(text_format(7, "white", True, buffer_=False))
+    header = QgsLayoutTableStyle()
+    header.enabled = True
+    header.cellBackgroundColor = QColor(brand.GREEN)
+    even = QgsLayoutTableStyle()
+    even.enabled = True
+    even.cellBackgroundColor = QColor(brand.PAPER)
+    table.setCellStyle(enum(QgsLayoutTable, "HeaderRow", "CellStyleGroup.HeaderRow"), header)
+    table.setCellStyle(enum(QgsLayoutTable, "EvenRows", "CellStyleGroup.EvenRows"), even)
+    table.setGridColor(QColor(brand.LINE))
+    table.setGridStrokeWidth(0.15)
+    table.setShowGrid(True)
+    table.setVerticalGrid(False)
+    table.setCellMargin(0.8)
+    table.setWrapBehavior(enum(QgsLayoutTable, "WrapText", "WrapBehavior.WrapText"))
+    table.setMaximumNumberOfFeatures(max_rows)
     layout.addMultiFrame(table)
-    frame = QgsLayoutFrame(layout, table)
-    frame.attemptMove(QgsLayoutPoint(x, y))
-    frame.attemptResize(QgsLayoutSize(w, h))
-    table.addFrame(frame)
+    frame_ = QgsLayoutFrame(layout, table)
+    frame_.attemptMove(QgsLayoutPoint(x, y))
+    frame_.attemptResize(QgsLayoutSize(w, h))
+    table.addFrame(frame_)
     return table
 
 
 def attribution(tour, basemap):
     parts = ["Данные © участники OpenStreetMap (ODbL)"]
     if basemap in BASEMAPS:
-        parts = [BASEMAPS[basemap][3]]
-    if tour.dem_name:
+        parts.append(BASEMAPS[basemap][3])
+    if tour.dem_name and not tour.urban:
         parts.append("рельеф: " + tour.dem_name)
-    parts.append("маршруты: OSRM/FOSSGIS · ГИС-экскурсовод для QGIS")
+    parts.append("маршруты: OSRM/FOSSGIS")
     return "; ".join(parts)
 
 
@@ -567,7 +776,9 @@ def approach_extent(tour):
     points = [tour.place.point]
     if tour.drive and tour.drive.ok:
         points += tour.drive.coords + [tour.drive.start]
-    return bbox_of(points, 8000)
+    elif tour.drive and tour.drive.start:
+        points.append(tour.drive.start)
+    return bbox_of(points, 12000 if not tour.urban else 1500)
 
 
 def area(box):
@@ -578,90 +789,129 @@ def scheme_extent(tour):
     coords = [c for leg in tour.legs for s in leg.segments for c in s.coords]
     box = tour.bbox
     if coords:
-        box = bbox_union(box, bbox_of(coords, 300))
+        route_box = bbox_of(coords, 300 if not tour.urban else 150)
+        # в городе зона бывает куда больше прогулки — показываем саму прогулку
+        box = route_box if tour.urban else bbox_union(box, route_box)
     return box
 
 
-def make_layouts(tour, added, folder, basemap="topo", project=None, export=True, log=None):
-    """Два макета: обзорная карта региона и карта-схема окрестностей. → {ключ: путь к PNG}."""
+def photos_extent(tour):
+    points = [(p.lon, p.lat) for p in tour.photos if p.lon is not None]
+    points += [s.point for s in tour.stops]
+    return bbox_of(points, 400 if tour.urban else 1200)
+
+
+def drive_text(tour):
+    drive = tour.drive
+    lines = []
+    if drive and drive.start_name:
+        lines.append("Откуда: %s%s" % (drive.start_name, " (%s)" % tour.start_reason if tour.start_reason else ""))
+    if drive and drive.ok:
+        lines.append("На машине: %s, ~%s" % (fmt_km(drive.distance_m), fmt_hours(drive.duration_s / 3600)))
+        for label_, meters in drive.roads[:5]:
+            lines.append("• %s — %s" % (label_, fmt_km(meters)))
+        if drive.last_mile_m > 300 and not tour.urban:
+            lines.append("Дальше пешком: %s до объекта" % fmt_km(drive.last_mile_m))
+    elif drive and drive.note:
+        lines.append(drive.note)
+    for kind, name, km, _ in tour.transport[:4]:
+        lines.append("• %s «%s» — %s" % (kind, name, fmt_km(km * 1000)))
+    return "\n".join(lines)
+
+
+def make_layouts(tour, added, basemap="topo", project=None):
+    """Три макета (обзорная карта, карта-схема маршрута, карта-схема фото) → {ключ: макет}."""
     project = project or QgsProject.instance()
     result = {}
     name = tour.place.name
-    base = [added["basemap"]] if "basemap" in added else []
-    relief = [added[k] for k in ("hillshade", "hypsometry") if k in added]
+    region = tour.region_name or tour.place.region
+    over_key = overview_basemap(basemap)
+    over_base = [added["basemap:" + over_key]] if "basemap:" + over_key in added else []
+    scheme_base = [added["basemap:" + basemap]] if "basemap:" + basemap in added else []
+    relief = [added[k] for k in ("hillshade", "hypsometry") if k in added] if basemap == "relief" else []
+    mode = brand.MODES[tour.mode]
 
-    # 1. Обзорная карта
+    # 1. Обзорная карта региона
     layout = new_layout(project, "Экскурсия «%s» — 1. Обзорная карта" % name)
-    keys = ["object", "town", "drive", "zone", "region"]
-    layers = [added[k] for k in keys if k in added] + base
-    map_item = add_map(layout, layers, mercator_rect(overview_extent(tour), project), 8, 24, 281, 172)
-    add_label(layout, "%s — как добраться" % name, 8, 5, 230, 10, 18, True, GREEN)
-    drive = tour.drive
-    sub = tour.region_name or tour.place.region
-    if drive and drive.ok:
-        sub = "%s · от %s %s на машине, ~%s" % (sub, drive.start_name, fmt_km(drive.distance_m),
-                                                fmt_hours(drive.duration_s / 3600))
-    add_label(layout, sub, 8, 15, 270, 7, 10, False, "#4d5a52")
-    add_legend(layout, map_item, [added[k] for k in keys if k in added], 11, 27)
-    add_scalebar(layout, map_item, 11, 182)
-    add_north(layout, map_item, 271, 27)
+    keys = ["object", "town", "settlements", "drive", "zone", "region"]
+    layers = [added[k] for k in keys if k in added] + over_base
+    frame(layout, "%s — как добраться" % name, "%s · %s" % (region, mode), "Лист 1 · обзорная карта",
+          attribution(tour, over_key))
+    map_item = add_map(layout, layers, mercator_rect(overview_extent(tour), project))
+    panel_heading(layout, "Условные обозначения", MAP_Y + 3)
+    legend_layers = [added[k] for k in keys if k in added]
+    add_legend(layout, map_item, legend_layers, PANEL_X + 3, MAP_Y + 10)
+    text_y = MAP_Y + 10 + legend_height(legend_layers)
+    panel_heading(layout, "Как добраться", text_y)
+    add_label(layout, drive_text(tour), PANEL_X + 4, text_y + 8, PANEL_W - 8, MAP_Y + MAP_H - text_y - 10,
+              7.3, False, brand.INK)
+    add_scalebar(layout, map_item, MAP_X + 3, MAP_Y + MAP_H - 11)
+    add_north(layout, map_item, MAP_X + MAP_W - 14, MAP_Y + 3)
     approach = approach_extent(tour)
     if area(overview_extent(tour)) > 20 * area(approach):
         # регион огромный — дорога теряется: врезка с подъездом и её рамка на карте
-        inset = add_map(layout, layers, mercator_rect(approach, project), 196, 113, 90, 80)
-        inset.setBackgroundColor(QColor("white"))
-        frame = QgsLayoutItemMapOverview("Врезка", map_item)
-        map_item.overviews().addOverview(frame)
-        frame.setLinkedMap(inset)
-        frame.setFrameSymbol(QgsFillSymbol.createSimple({
-            "color": "192,57,43,50", "outline_color": RED, "outline_width": "0.5"}))
-        add_label(layout, "Подъезд крупнее", 197, 108, 88, 5, 8, True, RED)
-    add_label(layout, attribution(tour, "osm" if basemap == "osm" else basemap), 8, 198, 281, 6, 6.5,
-              False, "#5d6d64")
-    result["overview_layout"] = layout
+        ix, iy, iw, ih = MAP_X + MAP_W - 66, MAP_Y + MAP_H - 52, 63, 49
+        inset = add_map(layout, layers, mercator_rect(approach, project), ix, iy, iw, ih, "white")
+        inset.setFrameStrokeColor(QColor(brand.ROUTE))
+        inset.setFrameStrokeWidth(QgsLayoutMeasurement(0.6))
+        overview = QgsLayoutItemMapOverview("Врезка", map_item)
+        map_item.overviews().addOverview(overview)
+        overview.setLinkedMap(inset)
+        overview.setFrameSymbol(QgsFillSymbol.createSimple({
+            "color": "211,84,0,45", "outline_color": brand.ROUTE, "outline_width": "0.5"}))
+        add_rect(layout, ix, iy - 5, 22, 5, brand.ROUTE)
+        add_label(layout, "ПОДЪЕЗД", ix + 1.5, iy - 4.6, 20, 4.5, 7, True, "white")
+    result["overview"] = layout
 
-    # 2. Карта-схема окрестностей
+    # 2. Карта-схема маршрута
     layout = new_layout(project, "Экскурсия «%s» — 2. Карта-схема маршрута" % name)
-    keys = ["stops", "photos", "others", "walk", "zone"]
-    layers = [added[k] for k in keys if k in added]
-    scheme_layers = layers + (relief if basemap == "relief" else []) + base
-    map_item = add_map(layout, scheme_layers, mercator_rect(scheme_extent(tour), project),
-                       8, 24, 200, 172)
-    add_label(layout, "%s — маршрут экскурсии" % name, 8, 5, 280, 10, 18, True, GREEN)
+    keys = ["stops", "others", "walk"] + ([] if tour.urban else ["zone"])
+    layers = [added[k] for k in keys if k in added] + relief + scheme_base
     t = tour.totals
-    sub = "%s, %s, ходового времени ~%s" % (
-        "кольцевой" if tour.loop else "в одну сторону", fmt_km(t.get("walk_m", 0)),
-        fmt_hours(t.get("hours_walk", 0)))
+    sub = "%s · %s, %s, ~%s пешком" % (mode, "кольцевой" if tour.loop else "в одну сторону",
+                                       fmt_km(t.get("walk_m", 0)), fmt_hours(t.get("hours_walk", 0)))
     if t.get("ascent"):
         sub += ", набор %d м" % t["ascent"]
-    add_label(layout, sub + " · зона поиска ±%d км" % tour.half_km, 8, 15, 280, 7, 10, False, "#4d5a52")
-    add_legend(layout, map_item, [added[k] for k in ("stops", "walk", "others", "zone") if k in added],
-               212, 24)
+    frame(layout, "%s — маршрут %s" % (name, "прогулки" if tour.urban else "экскурсии"), sub,
+          "Лист 2 · карта-схема маршрута", attribution(tour, basemap))
+    map_item = add_map(layout, layers, mercator_rect(scheme_extent(tour), project))
+    panel_heading(layout, "Условные обозначения", MAP_Y + 3)
+    legend_layers = [added[k] for k in keys if k in added]
+    add_legend(layout, map_item, legend_layers, PANEL_X + 3, MAP_Y + 10)
+    table_y = MAP_Y + 10 + legend_height(legend_layers)
+    panel_heading(layout, "Точки маршрута", table_y)
     if "stops" in added:
-        add_stops_table(layout, added["stops"], 212, 84, 77, 112)
-    add_scalebar(layout, map_item, 11, 182)
-    add_north(layout, map_item, 191, 27)
-    add_label(layout, attribution(tour, basemap), 8, 198, 281, 6, 6.5, False, "#5d6d64")
-    result["scheme_layout"] = layout
+        add_table(layout, added["stops"], ["order", "name", "kind"], ["№", "Объект", "Тип"],
+                  [5, 36, 24], PANEL_X + 3, table_y + 8, PANEL_W - 6, MAP_Y + MAP_H - table_y - 10)
+    add_scalebar(layout, map_item, MAP_X + 3, MAP_Y + MAP_H - 11)
+    add_north(layout, map_item, MAP_X + MAP_W - 14, MAP_Y + 3)
+    result["scheme"] = layout
 
-    if export:
-        for key, layout_key in (("overview", "overview_layout"), ("scheme", "scheme_layout")):
-            path = os.path.join(folder, "%s_map.png" % key)
-            if export_layout(result[layout_key], path, log):
-                result[key] = path
+    # 3. Карта-схема фотографий
+    if "photos" in added:
+        layout = new_layout(project, "Экскурсия «%s» — 3. Карта-схема фотографий" % name)
+        keys = ["photos", "stops", "walk"]
+        layers = [added[k] for k in keys if k in added] + relief + scheme_base
+        frame(layout, "%s — где сделаны фотографии" % name,
+              "%d фото · номера совпадают с отчётом" % added["photos"].featureCount(),
+              "Лист 3 · карта-схема фотографий", attribution(tour, basemap) + "; фото — Викисклад")
+        map_item = add_map(layout, layers, mercator_rect(photos_extent(tour), project))
+        panel_heading(layout, "Условные обозначения", MAP_Y + 3)
+        legend_layers = [added[k] for k in keys if k in added]
+        add_legend(layout, map_item, legend_layers, PANEL_X + 3, MAP_Y + 10)
+        table_y = MAP_Y + 10 + legend_height(legend_layers)
+        panel_heading(layout, "Фотографии", table_y)
+        add_table(layout, added["photos"], ["number", "object", "author"], ["№", "Объект", "Автор"],
+                  [5, 36, 24], PANEL_X + 3, table_y + 8, PANEL_W - 6, MAP_Y + MAP_H - table_y - 10)
+        add_scalebar(layout, map_item, MAP_X + 3, MAP_Y + MAP_H - 11)
+        add_north(layout, map_item, MAP_X + MAP_W - 14, MAP_Y + 3)
+        result["photos"] = layout
     return result
 
 
-def export_layout(layout, png_path, log=None, dpi=150):
+def render(layout, dpi=130, quality=88):
+    """Лист макета → JPEG-байты (для отчёта; на диск не пишется)."""
+    from .report import image_bytes
     exporter = QgsLayoutExporter(layout)
-    settings = QgsLayoutExporter.ImageExportSettings()
-    settings.dpi = dpi
-    status = exporter.exportToImage(png_path, settings)
-    if status != QgsLayoutExporter.Success:
-        if log:
-            log("⚠ Не удалось сохранить %s: %s" % (os.path.basename(png_path), exporter.errorMessage()))
-        return False
-    pdf = QgsLayoutExporter.PdfExportSettings()
-    pdf.dpi = 200
-    exporter.exportToPdf(os.path.splitext(png_path)[0] + ".pdf", pdf)
-    return True
+    image = exporter.renderPageToImage(0, QSize(), dpi)
+    return image_bytes(image, "JPG", quality)
