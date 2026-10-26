@@ -3,8 +3,6 @@
 
 import datetime
 import os
-import shutil
-import tempfile
 
 from qgis.core import (
     Qgis, QgsApplication, QgsCoordinateReferenceSystem, QgsCoordinateTransform, QgsProject,
@@ -65,8 +63,8 @@ class TourGuideDialog(QDialog):
         self.tour = None
         self.folder = ""
         self.layouts = {}
-        self.temp_dir = None
-        self.gpx_path = ""
+        self.gpx = ""                # трек хранится в памяти, пока открыто окно
+        self.gpx_name = "tour.gpx"
         self.settings = QgsSettings()
         self.progress = ProgressDialog(self)
         self.progress.cancel_requested.connect(self.cancel)
@@ -577,9 +575,6 @@ class TourGuideDialog(QDialog):
         stamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
         folder = os.path.join(base, "%s_%s" % (slug(tour.place.name), stamp))
         os.makedirs(folder, exist_ok=True)
-        if self.temp_dir is None:
-            self.temp_dir = tempfile.mkdtemp(prefix="gis_tour_guide_")
-        gpx = os.path.join(self.temp_dir, "%s.gpx" % slug(tour.place.name))
         elevation, tiles = None, False
         choice = self.dem.currentData()
         if choice == "auto":
@@ -590,7 +585,7 @@ class TourGuideDialog(QDialog):
                 from .dem_layer import LayerElevation
                 elevation = LayerElevation(layer)
         photos_dir = os.path.join(folder, "photos") if self.save_photos.isChecked() else None
-        task = TourTask(tour, settings, self.cache_dir(), gpx, elevation, tiles, photos_dir)
+        task = TourTask(tour, settings, self.cache_dir(), elevation, tiles, photos_dir)
         stages = PLAN_STAGES + TASK_STAGES + FINISH_STAGES
         self.result.setVisible(False)
         self.run_task(task, "Создаю экскурсию: %s" % tour.place.name, stages,
@@ -600,7 +595,10 @@ class TourGuideDialog(QDialog):
         tour = task.tour
         self.tour = tour
         self.folder = folder
-        self.gpx_path = task.gpx_path
+        # трек готов сразу после маршрута — кнопка работает, даже если карты или отчёт не получатся
+        self.gpx = task.gpx
+        self.gpx_name = "%s.gpx" % slug(tour.place.name)
+        self.gpx_button.setEnabled(bool(self.gpx))
         progress = self.progress
         basemap = self.basemap.currentData()
         if tour.urban and basemap == "topo":
@@ -643,6 +641,10 @@ class TourGuideDialog(QDialog):
             import traceback
             self.log("Ошибка при создании карт и отчёта: %s\n%s" % (error, traceback.format_exc()))
             progress.fail("Ошибка при создании карт и отчёта: %s" % error)
+            self.result_title.setText("⚠ Маршрут построен, но карты или отчёт не создались — "
+                                      "подробности в журнале. Трек GPX можно скачать.")
+            self.result_link.setText("")
+            self.result.setVisible(True)
 
     def show_result(self, tour, html_path):
         url = QUrl.fromLocalFile(html_path).toString()
@@ -653,7 +655,7 @@ class TourGuideDialog(QDialog):
         self.layouts_menu.clear()
         for key, name in self.layouts.items():
             self.layouts_menu.addAction(name.split("— ", 1)[-1], lambda k=key: self.open_layout(k))
-        self.gpx_button.setEnabled(bool(self.gpx_path and os.path.exists(self.gpx_path)))
+        self.gpx_button.setEnabled(bool(self.gpx))
         self.result.setVisible(True)
 
     # --- Карта и файлы ---
@@ -673,16 +675,23 @@ class TourGuideDialog(QDialog):
             QDesktopServices.openUrl(QUrl.fromLocalFile(path))
 
     def save_gpx(self):
-        if not self.gpx_path or not os.path.exists(self.gpx_path):
-            self.log("GPX уже удалён — создайте экскурсию заново.")
+        if not self.gpx:
+            self.log("Трека нет — создайте экскурсию заново.")
             return
-        default = os.path.join(os.path.expanduser("~"), os.path.basename(self.gpx_path))
+        default = os.path.join(self.folder or os.path.expanduser("~"), self.gpx_name)
         path, _ = QFileDialog.getSaveFileName(self, "Сохранить трек GPX", default, "GPX (*.gpx)")
-        if path:
-            if not path.lower().endswith(".gpx"):
-                path += ".gpx"
-            shutil.copyfile(self.gpx_path, path)
-            self.log("GPX сохранён: %s" % path)
+        if not path:
+            return
+        if not path.lower().endswith(".gpx"):
+            path += ".gpx"
+        try:
+            with open(path, "w", encoding="utf-8") as handle:
+                handle.write(self.gpx)
+        except OSError as error:
+            QMessageBox.warning(self, brand.NAME, "Не удалось сохранить GPX:\n%s" % error)
+            return
+        self.log("GPX сохранён: %s" % path)
+        self.status.setText("✓ GPX сохранён: %s" % path)
 
     def open_layout(self, key):
         name = self.layouts.get(key)
@@ -691,10 +700,8 @@ class TourGuideDialog(QDialog):
             self.iface.openLayoutDesigner(layout)
 
     def cleanup_temp(self):
-        if self.temp_dir and os.path.isdir(self.temp_dir):
-            shutil.rmtree(self.temp_dir, ignore_errors=True)
-        self.temp_dir = None
-        self.gpx_path = ""
+        """Окно закрыли — трек из памяти забываем."""
+        self.gpx = ""
         if hasattr(self, "gpx_button"):
             self.gpx_button.setEnabled(False)
 

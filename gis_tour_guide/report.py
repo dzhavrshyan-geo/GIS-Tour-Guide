@@ -167,6 +167,12 @@ def collect_images(http, tour, save_dir=None, log=None, progress=None):
 
 
 def write_gpx(tour, path):
+    with open(path, "w", encoding="utf-8") as handle:
+        handle.write(gpx_text(tour))
+
+
+def gpx_text(tour):
+    """Трек и точки экскурсии в формате GPX 1.1 (строка)."""
     lines = ['<?xml version="1.0" encoding="UTF-8"?>',
              '<gpx version="1.1" creator="GIS Tour Guide (QGIS)" '
              'xmlns="http://www.topografix.com/GPX/1/1">',
@@ -190,8 +196,7 @@ def write_gpx(tour, path):
         lines += ['<trkpt lat="%.6f" lon="%.6f"/>' % (c[1], c[0]) for c in tour.drive.coords]
         lines.append("</trkseg></trk>")
     lines.append("</gpx>")
-    with open(path, "w", encoding="utf-8") as handle:
-        handle.write("\n".join(lines))
+    return "\n".join(lines)
 
 
 def nice_step(value):

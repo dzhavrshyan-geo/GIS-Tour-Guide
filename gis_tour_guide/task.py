@@ -80,12 +80,12 @@ class CollectTask(BaseTask):
 class TourTask(BaseTask):
     """«Создать экскурсию»: всё, что не трогает проект QGIS (маршрут, сведения, фото, рельеф)."""
 
-    def __init__(self, tour, settings, cache_dir, gpx_path, elevation=None, use_terrain_tiles=True,
+    def __init__(self, tour, settings, cache_dir, elevation=None, use_terrain_tiles=True,
                  photos_dir=None):
         super().__init__("ГИС-экскурсовод: %s" % tour.place.name, cache_dir)
         self.tour = tour
         self.settings = settings
-        self.gpx_path = gpx_path
+        self.gpx = ""            # трек GPX — в памяти, на диск только по кнопке «Скачать»
         self.elevation = elevation
         self.use_terrain_tiles = use_terrain_tiles
         self.photos_dir = photos_dir
@@ -110,7 +110,7 @@ class TourTask(BaseTask):
             self.dem_grid = self.make_dem(tour, elevation)
             self.stage("relief", 1)
         tour.profile_png = report.draw_profile(tour)
-        report.write_gpx(tour, self.gpx_path)
+        self.gpx = report.gpx_text(tour)
 
     def make_dem(self, tour, elevation):
         coords = [c for leg in tour.legs for s in leg.segments for c in s.coords]

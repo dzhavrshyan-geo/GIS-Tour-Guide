@@ -432,18 +432,16 @@ class DialogTest(unittest.TestCase):
             dialog.checklist.set_checked([collecting.tour.candidates[2].uid])
 
             settings = dialog.current_settings(collecting.tour.place, tuple(dialog.checklist.checked_data()))
-            gpx = os.path.join(tempfile.mkdtemp(), "gorely.gpx")
-            dialog.temp_dir = os.path.dirname(gpx)
             out = os.path.join(folder, "run")
             os.makedirs(out)
-            work = task_module.TourTask(collecting.tour, settings, folder, gpx, None, True)
+            work = task_module.TourTask(collecting.tour, settings, folder, None, True)
             self.assertTrue(work.run(), work.error)
             self.assertEqual(len(work.tour.stops), 3)          # старт, главный, один отмеченный
             self.assertIsNotNone(work.dem_grid)
-            self.assertTrue(os.path.exists(gpx))
-            self.assertFalse(os.path.exists(os.path.join(out, "route.gpx")))
+            self.assertTrue(work.gpx.startswith("<?xml"))      # трек — в памяти, не на диске
             dialog.progress.start("тест", COLLECT_STAGES)
             dialog.tour_ready(work, out)
+            self.assertTrue(dialog.gpx_button.isEnabled())
             self.assertEqual(sorted(os.listdir(out)), ["report.html", "report.pdf", "tour.gpkg"])
             self.assertTrue(dialog.result.isVisibleTo(dialog))
             self.assertIn("report.html", dialog.result_link.text())
@@ -458,11 +456,46 @@ class DialogTest(unittest.TestCase):
                 dialog.save_gpx()
             finally:
                 QFileDialog.getSaveFileName = original_dialog
-            self.assertTrue(os.path.exists(target))
-            dialog.close()                                    # закрыли окно — временный GPX удалён
-            self.assertFalse(os.path.exists(gpx))
+            with open(target, encoding="utf-8") as handle:
+                self.assertEqual(handle.read(), work.gpx)
+            dialog.close()                                    # закрыли окно — трек забыт
+            self.assertEqual(dialog.gpx, "")
             self.assertFalse(dialog.gpx_button.isEnabled())
         finally:
+            task_module.Http = original
+            QgsProject.instance().clear()
+            shutil.rmtree(folder, ignore_errors=True)
+
+    def test_real_button_flow_enables_gpx(self):
+        """Как пользователь: «Создать экскурсию» → фоновые задачи QGIS → результат и GPX."""
+        import time
+        import fake_services
+        from gis_tour_guide import task as task_module
+        from gis_tour_guide.dialog import TourGuideDialog
+        folder = tempfile.mkdtemp()
+        http = fake_services.FakeHttp()
+        original = task_module.Http
+        task_module.Http = lambda *args, **kwargs: http
+        dialog = TourGuideDialog(FakeIface())
+        try:
+            dialog.folder_edit.setText(folder)
+            dialog.half_km.setValue(10)
+            dialog.max_points.setValue(2)
+            dialog.confirm_radius = lambda place: True
+            dialog.query.setText("вулкан Горелый")
+            dialog.show()
+            dialog.create_tour()
+            started = time.monotonic()
+            while not dialog.result.isVisible() and time.monotonic() - started < 120:
+                APP.processEvents()
+                time.sleep(0.02)
+            self.assertTrue(dialog.result.isVisible())
+            self.assertTrue(dialog.gpx_button.isEnabled())
+            dialog.progress.on_button()                       # «Закрыть» окно загрузки
+            APP.processEvents()
+            self.assertTrue(dialog.gpx_button.isEnabled())
+        finally:
+            dialog.hide()
             task_module.Http = original
             QgsProject.instance().clear()
             shutil.rmtree(folder, ignore_errors=True)
