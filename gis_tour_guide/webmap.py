@@ -238,6 +238,13 @@ def overview_data(tour, basemap):
     return data
 
 
+def geo_box(data):
+    points = [(p["lon"], p["lat"]) for p in data.get("points", [])]
+    lons = [p[0] for p in points] or [0]
+    lats = [p[1] for p in points] or [0]
+    return (min(lons), min(lats), max(lons), max(lats))
+
+
 def round_geojson(value):
     if isinstance(value, dict):
         return {k: round_geojson(v) for k, v in value.items()}
@@ -248,7 +255,33 @@ def round_geojson(value):
     return value
 
 
-BUILDERS = {"overview": overview_data, "scheme": scheme_data, "photos": photos_data}
+def trip_data(trip, basemap):
+    lines, points = [], []
+    for drive in trip.drives:
+        if drive and drive.ok and len(drive.coords) > 1:
+            step = max(1, len(drive.coords) // 600)
+            lines.append({"kind": "drive", "coords": latlon(drive.coords[::step] + [drive.coords[-1]]),
+                          "title": "Переезд от %s" % drive.start_name})
+    for number, tour in enumerate(trip.tours, 1):
+        for line in route_lines(tour):
+            line["nofit"] = True
+            lines.append(line)
+        points.append({"lat": tour.place.lat, "lon": tour.place.lon, "name": tour.place.name, "color": brand.PIN,
+                       "text": str(number), "label": "%d. %s" % (number, tour.place.name),
+                       "popup": "%s · %d объектов · %.1f км пешком" % (
+                           esc(tour.place.kind), len(tour.stops) - 1, tour.totals.get("walk_m", 0) / 1000)})
+        for item in tour.lodging:
+            points.append({"lat": item["lat"], "lon": item["lon"], "name": item["name"], "style": "dot",
+                           "color": "#8e5a1e", "label": "", "fit": False,
+                           "popup": "%s · %s" % (esc(item["label"]), esc(item["kind"]))})
+    points.append({"lat": trip.start[1], "lon": trip.start[0], "name": trip.start_name, "color": brand.DRIVE,
+                   "text": "⌂", "label": trip.start_name})
+    legend = [("width:16px;height:16px;border-radius:50%%;background:%s;border:2px solid #fff" % brand.PIN,
+               "объекты поездки"), LEGEND["drive"], LEGEND["trail"], LEGEND["lodging"]]
+    return {"lines": lines, "points": points, "legend": legend, "fitLines": True}
+
+
+BUILDERS = {"overview": overview_data, "scheme": scheme_data, "photos": photos_data, "trip": trip_data}
 
 
 def block(key, tour, basemap, title, sheet, print_src=""):
@@ -257,7 +290,8 @@ def block(key, tour, basemap, title, sheet, print_src=""):
     if key == "photos" and not any(p.get("photo") for p in data["points"]):
         return ""
     tiles = TILES.get(basemap if basemap in TILES else "light")
-    data.update(tiles=list(tiles), c=COLORS, box=list(tour.bbox))
+    box = getattr(tour, "bbox", None) or geo_box(data)
+    data.update(tiles=list(tiles), c=COLORS, box=list(box))
     map_id = "wm-" + key
     printed = ("<details class='wm-print'><summary>Лист для печати (как в PDF)</summary>"
                "<img src='%s' style='width:100%%'></details>" % print_src) if print_src else ""

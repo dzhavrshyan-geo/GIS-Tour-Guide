@@ -101,31 +101,32 @@ class TourTask(BaseTask):
             elevation = terrain.TerrariumSource(http)
         planner = Planner(http, self.settings, elevation, progress=self.stage, log=self.log)
         tour = planner.plan(self.tour)
-
-        self.stage("images", 0)
-        report.collect_images(http, tour, self.photos_dir, self.log,
-                              lambda part: self.stage("images", part))
-        self.stage("images", 1)
-        if tour.urban or elevation is None:
-            self.stage("relief", -1)
-        else:
-            self.stage("relief", 0)
-            self.dem_grid = self.make_dem(tour, elevation)
-            self.stage("relief", 1)
-        tour.profile_png = report.draw_profile(tour)
+        self.dem_grid = finish_tour(http, tour, elevation, self.photos_dir, self.stage, self.log)
         self.gpx = report.gpx_text(tour)
         self.kml = report.kml_text(tour)
 
-    def make_dem(self, tour, elevation):
+
+def finish_tour(http, tour, elevation, photos_dir, stage, log):
+    """После маршрута: фото в память, рельеф для карт, профиль высот. → сетка ЦМР или None."""
+    stage("images", 0)
+    report.collect_images(http, tour, photos_dir, log, lambda part: stage("images", part))
+    stage("images", 1)
+    dem_grid = None
+    if tour.urban or elevation is None:
+        stage("relief", -1)
+    else:
+        stage("relief", 0)
         coords = [c for leg in tour.legs for s in leg.segments for c in s.coords]
         box = geo.bbox_union(tour.bbox, geo.bbox_of(coords, 500)) if coords else tour.bbox
         try:
-            return elevation.grid(box, max_cells=900)
+            dem_grid = elevation.grid(box, max_cells=900)
         except Cancelled:
             raise
         except Exception as error:  # noqa: BLE001 - без отмывки рельефа тоже можно
-            self.log("⚠ Рельеф для карты не получен: %s" % error)
-            return None
+            log("⚠ Рельеф для карты не получен: %s" % error)
+        stage("relief", 1)
+    tour.profile_png = report.draw_profile(tour)
+    return dem_grid
 
 
 class OfflineTask(BaseTask):
@@ -145,16 +146,109 @@ class OfflineTask(BaseTask):
 class PublishTask(BaseTask):
     """Выложить отчёт на GitHub Pages и получить QR-код ссылки."""
 
-    def __init__(self, html, repo, token, folder_name, cache_dir):
+    def __init__(self, html, repo, token, folder_name, cache_dir, files=None):
         super().__init__("ГИС-экскурсовод: публикация отчёта", cache_dir)
         self.html, self.repo, self.token, self.folder_name = html, repo, token, folder_name
+        self.files = files or {}
         self.url, self.note, self.qr = "", "", None
 
     def work(self):
         from . import publish
         http = Http(None, is_cancelled=self.isCanceled, timeout=120)     # без кэша
-        self.url, self.note = publish.publish(http, self.token, self.repo, self.folder_name, self.html)
+        self.url, self.note = publish.publish(http, self.token, self.repo, self.folder_name, self.html,
+                                               self.files)
         try:
             self.qr = publish.qr_png(http, self.url)
         except NetError:
             self.qr = None
+
+
+TRIP_STAGES = [("places", "Поиск объектов поездки", 2), ("collect", "Попутные объекты у каждого", 4),
+               ("order", "Порядок объектов и переезды", 3), ("plan", "Экскурсии по объектам", 10),
+               ("media", "Фото и рельеф", 4), ("outputs", "Карты и отчёты по объектам", 8),
+               ("trip", "Итоговый отчёт поездки", 2)]
+
+
+class TripTask(BaseTask):
+    """«Поездка по региону»: экскурсии у нескольких объектов, переезды между ними, план по дням."""
+
+    def __init__(self, names, settings, cache_dir, elevation=None, use_terrain_tiles=True):
+        super().__init__("ГИС-экскурсовод: поездка", cache_dir)
+        self.names = [n.strip() for n in names if n.strip()]
+        self.settings = settings
+        self.elevation = elevation
+        self.use_terrain_tiles = use_terrain_tiles
+        self.trip = None
+        self.dem_grids = []
+        self.gpx = self.kml = ""
+
+    def work(self):
+        import copy
+        from . import osm, routing, trip as trip_module
+        from .model import Trip
+        http = self.http()
+        s = self.settings
+        places, missing = [], []
+        for number, name in enumerate(self.names):
+            self.stage("places", number / float(len(self.names)))
+            found = geocode.geocode(http, name, s.lang)
+            if found:
+                places.append(found[0])
+                self.log("%s → %s (%s)" % (name, found[0].name, found[0].region or found[0].display_name))
+            else:
+                missing.append(name)
+                self.log("⚠ «%s» не найдено — пропускаю" % name)
+        if not places:
+            raise NetError("Ни один объект поездки не найден.")
+        self.stage("places", 1)
+
+        tours = []
+        for number, place in enumerate(places):
+            self.stage("collect", number / float(len(places)))
+            base = copy.copy(s)
+            base.place, base.chosen = place, None
+            tours.append(Planner(http, base, log=self.log).collect(place))
+        self.stage("collect", 1)
+
+        self.stage("order", 0)
+        if s.start_text.strip():
+            found = geocode.geocode(http, s.start_text, s.lang, 3)
+            start = (found[0].name, found[0].lon, found[0].lat) if found else None
+            reason = "указано вами"
+        else:
+            start = None
+        if not s.start_text.strip() or start is None:
+            town, reason = osm.pick_start(tours[0].capital, tours[0].settlements, tours[0].place.point)
+            start = (town.name, town.lon, town.lat) if town else (places[0].name, places[0].lon, places[0].lat)
+        ordered = trip_module.order_bases((start[1], start[2]), tours, s.loop)
+        trip = Trip(title="Поездка: " + " — ".join(t.place.name for t in ordered), start_name=start[0],
+                    start=(start[1], start[2]), start_reason=reason, date=s.date, loop=s.loop, missing=missing)
+        self.stage("order", 1)
+
+        elevation = self.elevation
+        if elevation is None and self.use_terrain_tiles:
+            elevation = terrain.TerrariumSource(http)
+        previous = start
+        for number, tour in enumerate(ordered):
+            self.stage("plan", number / float(len(ordered)))
+            base = copy.copy(s)
+            base.place, base.chosen, base.start_text = tour.place, None, ""
+            base.start_point, base.lodging_always = previous, True
+            Planner(http, base, None if tour.urban else elevation, log=self.log).plan(tour)
+            trip.drives.append(tour.drive)
+            head = tour.stops[0].point if tour.stops else tour.place.point
+            previous = (tour.place.name, head[0], head[1])
+            trip.tours.append(tour)
+        if s.loop:
+            trip.drives.append(routing.drive(http, (previous[1], previous[2]), previous[0], trip.start))
+        self.stage("plan", 1)
+
+        self.stage("media", 0)
+        for number, tour in enumerate(trip.tours):
+            self.dem_grids.append(finish_tour(http, tour, None if tour.urban else elevation, None,
+                                              lambda key, part: None, self.log))
+            self.stage("media", (number + 1) / float(len(trip.tours)))
+        trip_module.plan_days(trip)
+        self.gpx = trip_module.gpx_text(trip, [report.gpx_text(t) for t in trip.tours])
+        self.kml = trip_module.kml_text(trip, [report.kml_text(t) for t in trip.tours])
+        self.trip = trip

@@ -317,6 +317,13 @@ class FakeHttp:
                 if "Петропавловск" in params["q"]:
                     return [{"lat": str(TOWN[1]), "lon": str(TOWN[0]), "name": "Петропавловск-Камчатский",
                              "category": "place", "type": "city", "osm_type": "node", "osm_id": 50}]
+                if "Вилючинск" in params["q"]:          # второй объект поездки — в 20 км от Горелого
+                    return [{"lat": "52.7000", "lon": "158.2800", "name": "Вилючинский", "category": "natural",
+                             "type": "volcano", "osm_type": "node", "osm_id": 2,
+                             "display_name": "Вилючинский, Елизовский район, Камчатский край, Россия",
+                             "address": {"state": "Камчатский край", "country": "Россия",
+                                         "country_code": "ru"},
+                             "extratags": {"ele": "2173", "wikidata": "Q2"}}]
                 return [{"lat": "52.5580", "lon": "158.0300", "name": "Горелый", "category": "natural",
                          "type": "volcano", "osm_type": "node", "osm_id": 1,
                          "display_name": "Горелый, Елизовский район, Камчатский край, Россия",
@@ -484,6 +491,7 @@ class FakeHttp:
         path = urllib.parse.urlsplit(url).path
         if method == "PUT":
             self.published = (urllib.parse.unquote(path), json.loads(data.decode()))
+            self.published_all = getattr(self, "published_all", []) + [self.published[0]]
             return json.dumps({"content": {"path": path}}).encode()
         if path.endswith("/pages"):
             if data is None:

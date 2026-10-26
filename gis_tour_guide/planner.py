@@ -64,6 +64,8 @@ class Settings:
     nature: bool = True
     weather: bool = True
     chosen: tuple = None        # uid выбранных вручную; None — топ по популярности
+    start_point: tuple = None   # (название, lon, lat) — откуда ехать (для поездки: предыдущий объект)
+    lodging_always: bool = False  # искать ночлег, даже если за день успеть (поездка на несколько дней)
 
 
 class Planner:
@@ -279,7 +281,7 @@ class Planner:
                 ("weather", self.job_weather if self.s.weather else None),
                 ("photos", self.job_photos if self.s.photos else None),
                 ("nature", self.job_nature if self.s.nature and not tour.urban else None),
-                ("lodging", self.job_lodging if tour.overnight else None),
+                ("lodging", self.job_lodging if tour.overnight or self.s.lodging_always else None),
                 ("access", self.job_access)]
         with ThreadPoolExecutor(len(jobs)) as pool:
             futures = []
@@ -312,7 +314,9 @@ class Planner:
         """Точка начала пешего маршрута и её название; заполняет tour.drive."""
         place = tour.place
         start, reason = None, ""
-        if self.s.start_text.strip():
+        if self.s.start_point:
+            start, reason = tuple(self.s.start_point), "предыдущий пункт поездки"
+        elif self.s.start_text.strip():
             found = self.soft("Начальная точка", geocode.geocode, self.http, self.s.start_text,
                               self.s.lang, 3)
             if found:

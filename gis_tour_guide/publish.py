@@ -53,19 +53,25 @@ def pages_url(http, token, repo, branch):
             else "https://%s.github.io/%s/" % (owner.lower(), name)
 
 
-def publish(http, token, repo, folder_name, html):
-    """Выложить отчёт; → (адрес страницы, предупреждение или "")."""
+def put_file(http, token, repo, branch, path, text, message):
+    body = json.dumps({"message": message, "branch": branch,
+                       "content": base64.b64encode(text.encode("utf-8")).decode("ascii")}).encode()
+    http.json("%s/repos/%s/contents/%s" % (API, repo, urllib.parse.quote(path)), data=body, ttl=0,
+              tries=1, headers=headers(token), method="PUT", timeout=120)
+
+
+def publish(http, token, repo, folder_name, html, files=None):
+    """Выложить отчёт (и вложенные отчёты files: {путь: html}); → (адрес страницы, предупреждение или "")."""
     repo = repo.strip().strip("/")
     if repo.count("/") != 1:
         raise NetError("Укажите репозиторий в виде «владелец/репозиторий».")
     try:
         info = http.json("%s/repos/%s" % (API, repo), ttl=0, tries=1, headers=headers(token))
         branch = info.get("default_branch") or "main"
-        path = "tours/%s/index.html" % folder_name
-        body = json.dumps({"message": "ГИС-экскурсовод: %s" % folder_name, "branch": branch,
-                           "content": base64.b64encode(html.encode("utf-8")).decode("ascii")}).encode()
-        http.json("%s/repos/%s/contents/%s" % (API, repo, urllib.parse.quote(path)), data=body, ttl=0,
-                  tries=1, headers=headers(token), method="PUT", timeout=120)
+        message = "ГИС-экскурсовод: %s" % folder_name
+        for path, text in sorted((files or {}).items()):
+            put_file(http, token, repo, branch, "tours/%s/%s" % (folder_name, path), text, message)
+        put_file(http, token, repo, branch, "tours/%s/index.html" % folder_name, html, message)
         site = pages_url(http, token, repo, branch)
     except NetError as error:
         raise NetError(explain(error))

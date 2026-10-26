@@ -204,3 +204,18 @@ class Tour:
         item = (name, url, license_)
         if item not in self.sources:
             self.sources.append(item)
+
+
+@dataclass
+class Trip:
+    """Поездка по региону: несколько объектов с экскурсиями, переезды между ними."""
+    title: str
+    start_name: str = ""
+    start: tuple = None
+    start_reason: str = ""
+    tours: list = field(default_factory=list)       # Tour в порядке посещения
+    drives: list = field(default_factory=list)      # DriveRoute: старт → 1 → 2 → … → старт
+    days: list = field(default_factory=list)        # [{"number", "items": [строки], "hours"}]
+    date: str = ""
+    loop: bool = True
+    missing: list = field(default_factory=list)     # названия, которые не нашлись

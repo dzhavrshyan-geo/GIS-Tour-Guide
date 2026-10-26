@@ -12,14 +12,15 @@ from qgis.PyQt.QtCore import QDate, Qt, QUrl
 from qgis.PyQt.QtGui import QDesktopServices, QIcon
 from qgis.PyQt.QtWidgets import (
     QCheckBox, QComboBox, QDateEdit, QDialog, QFileDialog, QFormLayout, QFrame, QGridLayout, QGroupBox,
-    QHBoxLayout, QLabel, QLineEdit, QMenu, QMessageBox, QPushButton, QScrollArea, QSpinBox,
+    QHBoxLayout, QLabel, QLineEdit, QMenu, QMessageBox, QPlainTextEdit, QPushButton, QScrollArea, QSpinBox,
     QSizePolicy, QToolButton, QVBoxLayout, QWidget,
 )
 
-from . import brand, maps, offline, osm, report, schedule
+from . import brand, geo, maps, offline, osm, outputs, schedule
 from .planner import COLLECT_STAGES, PLAN_STAGES, Settings
 from .progress import ProgressDialog
-from .task import FINISH_STAGES, OFFLINE_STAGES, TASK_STAGES, CollectTask, GeocodeTask, OfflineTask, TourTask
+from .task import (FINISH_STAGES, OFFLINE_STAGES, TASK_STAGES, TRIP_STAGES, CollectTask, GeocodeTask,
+                   OfflineTask, TourTask, TripTask)
 from .text import fmt_hours, fmt_km, latin_slug, slug
 from .widgets import CheckableComboBox
 
@@ -30,6 +31,7 @@ BASEMAP_CHOICES = [("topo", "OpenTopoMap — топокарта с тропам�
 MODE_CHOICES = [("auto", "Определить автоматически"), ("nature", "Природный туризм"),
                 ("urban", "Городской туризм")]
 RECOMMENDED_KM = {"nature": (10, 20, 15), "urban": (1, 3, 2)}
+TRIP_MAX = 5                 # объектов в поездке, вместе с первым
 
 
 def guess_mode(place, choice):
@@ -61,6 +63,7 @@ class TourGuideDialog(QDialog):
         self.collected = None        # Tour после «Подобрать попутные объекты»
         self.task = None
         self.tour = None
+        self.trip = None             # поездка на несколько дней (вместо self.tour)
         self.folder = ""
         self.layouts = {}
         self.added = {}
@@ -99,6 +102,7 @@ class TourGuideDialog(QDialog):
         outer.addWidget(scroll, 1)
         self.status = QLabel("")
         self.status.setObjectName("Hint")
+        self.status.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
         outer.addWidget(self.status)
         self.load_settings()
         self.update_state()
@@ -131,6 +135,18 @@ class TourGuideDialog(QDialog):
         self.place_info.setObjectName("PlaceInfo")
         self.place_info.setWordWrap(True)
         form.addRow(self.place_info)
+        self.trip_mode = QCheckBox("Поездка на несколько дней — ещё объекты региона")
+        self.trip_mode.setToolTip("2–5 объектов: у каждого своя экскурсия, между ними переезды на машине, "
+                                  "ночлег рядом с каждым и план по дням")
+        self.trip_mode.toggled.connect(self.trip_mode_changed)
+        form.addRow(self.trip_mode)
+        self.trip_names = QPlainTextEdit()
+        self.trip_names.setPlaceholderText("По одному в строке, до %d, например:\nвулкан Мутновский\n"
+                                           "Долина гейзеров" % (TRIP_MAX - 1))
+        self.trip_names.setMaximumHeight(80)
+        self.trip_names.setVisible(False)
+        self.trip_names.textChanged.connect(self.update_state)
+        form.addRow(self.trip_names)
         return box
 
     def build_neighbours(self):
@@ -248,12 +264,14 @@ class TourGuideDialog(QDialog):
         layout = QVBoxLayout(self.result)
         self.result_title = QLabel("")
         self.result_title.setObjectName("ResultTitle")
+        self.result_title.setWordWrap(True)
         layout.addWidget(self.result_title)
         self.result_link = QLabel("")
         self.result_link.setObjectName("Link")
         self.result_link.setOpenExternalLinks(True)
         self.result_link.setTextInteractionFlags(Qt.TextInteractionFlag.TextBrowserInteraction)
         self.result_link.setWordWrap(True)
+        self.result_link.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
         layout.addWidget(self.result_link)
         row = QHBoxLayout()
         self.pdf_button = QPushButton("Открыть PDF")
@@ -282,11 +300,13 @@ class TourGuideDialog(QDialog):
         self.layouts_button.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
         self.layouts_menu = QMenu(self.layouts_button)
         self.layouts_button.setMenu(self.layouts_menu)
-        for widget in (self.pdf_button, self.gpx_button, self.share_button, self.offline_button, folder,
-                       self.layouts_button):
-            row.addWidget(widget)
-        row.addStretch(1)
-        layout.addLayout(row)
+        second = QHBoxLayout()           # две строки кнопок — окно не шире 560 px
+        for line, widgets in ((row, (self.pdf_button, self.gpx_button, self.offline_button)),
+                              (second, (self.share_button, folder, self.layouts_button))):
+            for widget in widgets:
+                line.addWidget(widget)
+            line.addStretch(1)
+            layout.addLayout(line)
         self.result.setVisible(False)
         return self.result
 
@@ -363,9 +383,30 @@ class TourGuideDialog(QDialog):
 
     def update_state(self, *_args):
         busy = self.task is not None
-        self.collect_button.setEnabled(not busy and bool(self.query.text().strip()))
-        self.checklist.setEnabled(self.collected is not None and not busy)
-        self.run_button.setEnabled(not busy and bool(self.query.text().strip()))
+        trip = self.trip_mode.isChecked()
+        self.collect_button.setEnabled(not busy and not trip and bool(self.query.text().strip()))
+        self.checklist.setEnabled(self.collected is not None and not busy and not trip)
+        for button in self.variant_buttons.values():
+            button.setEnabled(self.collected is not None and not trip)
+        ready = bool(self.query.text().strip()) and (not trip or bool(self.trip_list()[1:]))
+        self.run_button.setEnabled(not busy and ready)
+        self.run_button.setText("Создать поездку" if trip else "Создать экскурсию")
+
+    def trip_list(self):
+        """Объекты поездки: первый — из поля поиска, остальные — по строкам."""
+        names = [self.query.text().strip()] + [line.strip() for line in self.trip_names.toPlainText().split("\n")]
+        unique = []
+        for name in names:
+            if name and name.lower() not in [n.lower() for n in unique]:
+                unique.append(name)
+        return unique[:TRIP_MAX]
+
+    def trip_mode_changed(self, checked):
+        self.trip_names.setVisible(checked)
+        if checked:
+            self.neighbours_hint.setText("В поездке у каждого объекта отмечаются %d самых популярных "
+                                         "попутных объектов (поле «Сколько объектов»)." % self.max_points.value())
+        self.update_state()
 
     def place_changed(self, *_args):
         place = self.current_place()
@@ -644,8 +685,30 @@ class TourGuideDialog(QDialog):
             photos=self.want_photos.isChecked(), nature=self.want_nature.isChecked(),
             weather=self.want_weather.isChecked(), chosen=chosen)
 
+    def elevation_choice(self):
+        """Источник высот из списка «Рельеф»: (слой или None, качать ли Terrain Tiles)."""
+        choice = self.dem.currentData()
+        if choice == "auto":
+            return None, True
+        if choice and choice != "none":
+            layer = QgsProject.instance().mapLayer(choice)
+            if layer is not None:
+                from .dem_layer import LayerElevation
+                return LayerElevation(layer), False
+        return None, False
+
+    def new_folder(self, name):
+        base = self.folder_edit.text().strip() or os.path.join(os.path.expanduser("~"), "GIS_Tour_Guide")
+        stamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+        folder = os.path.join(base, "%s_%s" % (slug(name), stamp))
+        os.makedirs(folder, exist_ok=True)
+        return folder
+
     def create_tour(self):
         if self.task is not None:
+            return
+        if self.trip_mode.isChecked():
+            self.create_trip()
             return
         if self.collected is None:
             self.collect(then=self.create_tour)
@@ -653,19 +716,8 @@ class TourGuideDialog(QDialog):
         self.save_settings()
         tour = self.collected
         settings = self.current_settings(tour.place, tuple(self.checklist.checked_data()))
-        base = self.folder_edit.text().strip() or os.path.join(os.path.expanduser("~"), "GIS_Tour_Guide")
-        stamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-        folder = os.path.join(base, "%s_%s" % (slug(tour.place.name), stamp))
-        os.makedirs(folder, exist_ok=True)
-        elevation, tiles = None, False
-        choice = self.dem.currentData()
-        if choice == "auto":
-            tiles = True
-        elif choice and choice != "none":
-            layer = QgsProject.instance().mapLayer(choice)
-            if layer is not None:
-                from .dem_layer import LayerElevation
-                elevation = LayerElevation(layer)
+        folder = self.new_folder(tour.place.name)
+        elevation, tiles = self.elevation_choice()
         photos_dir = os.path.join(folder, "photos") if self.save_photos.isChecked() else None
         task = TourTask(tour, settings, self.cache_dir(), elevation, tiles, photos_dir)
         stages = PLAN_STAGES + TASK_STAGES + FINISH_STAGES
@@ -681,66 +733,93 @@ class TourGuideDialog(QDialog):
         self.gpx = task.gpx
         self.kml = task.kml
         self.gpx_name = "%s.gpx" % slug(tour.place.name)
+        self.trip = None
         self.gpx_button.setEnabled(bool(self.gpx))
-        progress = self.progress
-        basemap = self.basemap.currentData()
-        if tour.urban and basemap == "topo":
-            basemap = "light"      # в городе топокарта ни к чему
+        self.offline_button.setEnabled(True)
         try:
-            progress.update_stage("layers", 0)
-            QgsApplication.processEvents()
-            layers = maps.build_layers(tour)
-            saved = maps.save_gpkg(layers, os.path.join(folder, "tour.gpkg"), task.dem_grid, self.log)
-            _group, added = maps.add_to_project(tour, saved, basemap)
-            self.added = added
-            progress.update_stage("layers", 1)
-            progress.update_stage("maps", 0)
-            QgsApplication.processEvents()
-            layouts = maps.make_layouts(tour, added, basemap)
-            self.layouts = {key: layout.name() for key, layout in layouts.items()}
-            pictures = {}
-            for number, (key, layout) in enumerate(layouts.items()):
-                pictures[key] = maps.render(layout)
-                progress.update_stage("maps", (number + 1) / float(len(layouts)))
-                QgsApplication.processEvents()
-            progress.update_stage("report", 0)
-            QgsApplication.processEvents()
-            images = report.gather(tour, pictures)
-            html_path = os.path.join(folder, "report.html")
-            with open(html_path, "w", encoding="utf-8") as handle:
-                handle.write(report.build_html(tour, images, basemap=maps.overview_basemap(basemap)))
-            progress.update_stage("report", 0.5)
-            QgsApplication.processEvents()
-            report.write_pdf(tour, images, os.path.join(folder, "report.pdf"))
-            progress.update_stage("report", 1)
-            self.show_result(tour, html_path)
+            result = outputs.build_tour(tour, folder, task.dem_grid, self.basemap.currentData(), self.log,
+                                        self.progress_step)
+            self.added = result["added"]
+            self.layouts = result["layouts"]
+            self.show_result("✓ Экскурсия готова: %s — %s, %d объектов" % (
+                tour.place.name, fmt_km(tour.totals.get("walk_m", 0)), len(tour.stops) - 1), result["html"])
             self.zoom_to(maps.scheme_extent(tour))
-            progress.finish("Экскурсия готова")
+            self.progress.finish("Экскурсия готова")
             self.log("Готово: %s" % folder)
             self.iface.messageBar().pushMessage(
                 brand.NAME, "Экскурсия «%s» готова: %s, %d объектов" % (
                     tour.place.name, fmt_km(tour.totals.get("walk_m", 0)), len(tour.stops) - 1),
                 Qgis.MessageLevel.Success if hasattr(Qgis, "MessageLevel") else Qgis.Success, 8)
         except Exception as error:  # noqa: BLE001 - покажем, что именно сломалось
-            import traceback
-            self.log("Ошибка при создании карт и отчёта: %s\n%s" % (error, traceback.format_exc()))
-            progress.fail("Ошибка при создании карт и отчёта: %s" % error)
-            self.result_title.setText("⚠ Маршрут построен, но карты или отчёт не создались — "
-                                      "подробности в журнале. Трек GPX можно скачать.")
-            self.result_link.setText("")
-            self.result.setVisible(True)
+            self.outputs_failed(error)
 
-    def show_result(self, tour, html_path):
+    def progress_step(self, key, fraction):
+        self.progress.update_stage(key, fraction)
+        QgsApplication.processEvents()
+
+    def outputs_failed(self, error):
+        import traceback
+        self.log("Ошибка при создании карт и отчёта: %s\n%s" % (error, traceback.format_exc()))
+        self.progress.fail("Ошибка при создании карт и отчёта: %s" % error)
+        self.result_title.setText("⚠ Маршрут построен, но карты или отчёт не создались — "
+                                  "подробности в журнале. Трек GPX можно скачать.")
+        self.result_link.setText("")
+        self.result.setVisible(True)
+
+    def show_result(self, title, html_path):
         url = QUrl.fromLocalFile(html_path).toString()
-        self.result_title.setText("✓ Экскурсия готова: %s — %s, %d объектов" % (
-            tour.place.name, fmt_km(tour.totals.get("walk_m", 0)), len(tour.stops) - 1))
+        self.result_title.setText(title)
         self.result_link.setText("Отчёт: <a href='%s' style='color:%s;font-weight:bold'>%s</a>" % (
             url, brand.GREEN, html_path))
         self.layouts_menu.clear()
         for key, name in self.layouts.items():
-            self.layouts_menu.addAction(name.split("— ", 1)[-1], lambda k=key: self.open_layout(k))
+            self.layouts_menu.addAction(name if self.trip else name.split("— ", 1)[-1],
+                                        lambda k=key: self.open_layout(k))
         self.gpx_button.setEnabled(bool(self.gpx))
         self.result.setVisible(True)
+
+    # --- Поездка на несколько дней ---
+
+    def create_trip(self):
+        names = self.trip_list()
+        if len(names) < 2:
+            self.log("Для поездки добавьте хотя бы ещё один объект (по одному в строке).")
+            return
+        self.save_settings()
+        settings = self.current_settings(None)
+        folder = self.new_folder("поездка_" + names[0])
+        elevation, tiles = self.elevation_choice()
+        self.result.setVisible(False)
+        self.run_task(TripTask(names, settings, self.cache_dir(), elevation, tiles),
+                      "Поездка: %s" % " — ".join(names), TRIP_STAGES, lambda done: self.trip_ready(done, folder))
+
+    def trip_ready(self, task, folder):
+        trip = task.trip
+        self.trip, self.tour, self.folder = trip, None, folder
+        self.gpx, self.kml = task.gpx, task.kml
+        self.gpx_name = "%s.gpx" % slug("поездка_" + trip.tours[0].place.name)
+        self.gpx_button.setEnabled(bool(self.gpx))
+        self.offline_button.setEnabled(False)      # офлайн-карта — для отдельной экскурсии
+        self.added = {}
+        try:
+            result = outputs.build_trip(trip, folder, task.dem_grids, self.basemap.currentData(), self.log,
+                                        self.progress_step)
+            self.layouts = {"trip": result["layout"]}
+            for number, item in enumerate(result["tours"], 1):
+                for key, name in item["layouts"].items():
+                    self.layouts["%d_%s" % (number, key)] = name
+            totals = result["totals"]
+            self.show_result("✓ Поездка готова: %d %s, %d дн., переезды %s, пешком %s" % (
+                len(trip.tours), "объекта" if len(trip.tours) < 5 else "объектов", totals["days"],
+                fmt_km(totals["drive_m"]), fmt_km(totals["walk_m"])), result["html"])
+            if trip.missing:
+                self.result_title.setText(self.result_title.text() + "\n⚠ Не найдены: " + ", ".join(trip.missing))
+            points = [trip.start] + [s.point for t in trip.tours for s in t.stops]
+            self.zoom_to(geo.bbox_of(points, 5000))
+            self.progress.finish("Поездка готова")
+            self.log("Готово: %s" % folder)
+        except Exception as error:  # noqa: BLE001
+            self.outputs_failed(error)
 
     # --- Карта и файлы ---
 
@@ -890,6 +969,12 @@ class TourGuideDialog(QDialog):
             repo, token = self.settings.value(publish.REPO_KEY, ""), self.share_token()
         with open(html_path, encoding="utf-8") as handle:
             html = handle.read()
+        files = {}                                     # отчёты объектов поездки — в подпапках
+        for name in sorted(os.listdir(self.folder)):
+            nested = os.path.join(self.folder, name, "report.html")
+            if os.path.isfile(nested):
+                with open(nested, encoding="utf-8") as handle:
+                    files[name + "/report.html"] = handle.read()
 
         def done(task):
             self.share_url = task.url
@@ -897,8 +982,8 @@ class TourGuideDialog(QDialog):
                                      % (task.url, brand.GREEN, task.url))
             self.show_share(task)
 
-        self.run_task(PublishTask(html, repo, token, latin_slug(os.path.basename(self.folder)), self.cache_dir()),
-                      "", None, done)
+        self.run_task(PublishTask(html, repo, token, latin_slug(os.path.basename(self.folder)), self.cache_dir(),
+                                  files), "", None, done)
         self.log("Публикую отчёт в %s…" % repo)
 
     def show_share(self, task):

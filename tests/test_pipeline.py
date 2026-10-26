@@ -554,6 +554,87 @@ class DialogTest(unittest.TestCase):
             QgsProject.instance().clear()
             shutil.rmtree(folder, ignore_errors=True)
 
+    def test_trip(self):
+        """Поездка на несколько дней: два объекта, переезды, ночлег, общий отчёт и трек."""
+        import fake_services
+        from gis_tour_guide import task as task_module
+        from gis_tour_guide.dialog import TourGuideDialog
+        from gis_tour_guide.task import TRIP_STAGES
+        folder = tempfile.mkdtemp()
+        http = fake_services.FakeHttp()
+        original = task_module.Http
+        task_module.Http = lambda *args, **kwargs: http
+        dialog = TourGuideDialog(FakeIface())
+        try:
+            dialog.folder_edit.setText(folder)
+            dialog.half_km.setValue(8)
+            dialog.max_points.setValue(2)
+            dialog.query.setText("вулкан Горелый")
+            dialog.trip_mode.setChecked(True)
+            self.assertFalse(dialog.run_button.isEnabled())          # нужен ещё хотя бы один объект
+            dialog.trip_names.setPlainText("вулкан Вилючинский\nвулкан горелый\n")
+            self.assertEqual(dialog.trip_list(), ["вулкан Горелый", "вулкан Вилючинский"])
+            self.assertTrue(dialog.run_button.isEnabled())
+            self.assertEqual(dialog.run_button.text(), "Создать поездку")
+            self.assertFalse(dialog.collect_button.isEnabled())
+
+            work = task_module.TripTask(dialog.trip_list(), dialog.current_settings(None), folder, None, True)
+            stages = []
+            work.stage_changed.connect(lambda key, fraction: stages.append(key))
+            self.assertTrue(work.run(), work.error)
+            self.assertEqual(list(dict.fromkeys(stages)), [k for k, _, _ in TRIP_STAGES][:5])
+            trip = work.trip
+            self.assertEqual(len(trip.tours), 2)
+            self.assertEqual(trip.start_name, "Петропавловск-Камчатский")
+            self.assertEqual(len(trip.drives), 3)                    # туда, между объектами, обратно
+            self.assertTrue(all(t.lodging for t in trip.tours))     # ночлег у каждого объекта
+            self.assertGreaterEqual(len(trip.days), 2)
+            self.assertIn("Переезд", trip.days[0]["items"][0])
+            self.assertIn("Горелый", work.gpx)
+            self.assertIn("Вилючинский", work.gpx)
+            self.assertIn("<Folder><name>Переезды</name>", work.kml)
+
+            out = os.path.join(folder, "trip")
+            os.makedirs(out)
+            dialog.progress.start("тест", TRIP_STAGES)
+            dialog.trip_ready(work, out)
+            self.assertTrue(dialog.gpx_button.isEnabled())
+            self.assertFalse(dialog.offline_button.isEnabled())
+            self.assertIn("Поездка готова", dialog.result_title.text())
+            names = sorted(os.listdir(out))
+            self.assertEqual(names[-3:], ["report.html", "report.pdf", "trip.gpkg"])
+            subfolders = [n for n in names if os.path.isdir(os.path.join(out, n))]
+            self.assertEqual(len(subfolders), 2)
+            for sub in subfolders:
+                self.assertRegex(sub, r"^[12]_[a-z0-9_]+$")
+                self.assertEqual(sorted(os.listdir(os.path.join(out, sub))),
+                                 ["report.html", "report.pdf", "tour.gpkg"])
+            with open(os.path.join(out, "report.html"), encoding="utf-8") as handle:
+                html = handle.read()
+            for sub in subfolders:
+                self.assertIn("%s/report.html" % sub, html)
+            self.assertIn("План по дням", html)
+            self.assertEqual(len(dialog.layouts_menu.actions()), 7)   # карта поездки + 3 × 2
+            dialog.open_layout("trip")
+            self.assertIn("карта поездки", dialog.iface.opened[-1])
+
+            # ссылкой публикуются и отчёты объектов — относительные ссылки работают
+            from gis_tour_guide import publish
+            dialog.settings.setValue(publish.REPO_KEY, "dzhavrshyan-geo/tours")
+            dialog.session_token = "good-token"
+            started = []
+            dialog.run_task = lambda task, *args: started.append(task)
+            dialog.share()
+            share = started[0]
+            self.assertEqual(sorted(share.files), sorted(s + "/report.html" for s in subfolders))
+            self.assertTrue(share.run(), share.error)
+            self.assertEqual(len(http.published_all), 3)
+            self.assertTrue(http.published_all[-1].endswith("/index.html"))
+        finally:
+            task_module.Http = original
+            QgsProject.instance().clear()
+            shutil.rmtree(folder, ignore_errors=True)
+
     def test_real_button_flow_enables_gpx(self):
         """Как пользователь: «Создать экскурсию» → фоновые задачи QGIS → результат и GPX."""
         import time

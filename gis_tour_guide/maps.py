@@ -494,17 +494,20 @@ def overview_basemap(basemap):
     return basemap if basemap in BASEMAPS else "light"
 
 
-def add_to_project(tour, layers, basemap="topo", project=None):
-    """Группа «Экскурсия: …» с подгруппами «Векторные данные» и «Растры и подложки»."""
+def add_to_project(tour, layers, basemap="topo", project=None, parent=None):
+    """Группа «Экскурсия: …» с подгруппами «Векторные данные» и «Растры и подложки».
+
+    parent — группа поездки, в которую вложить экскурсию (иначе — корень проекта).
+    """
     project = project or QgsProject.instance()
-    root = project.layerTreeRoot()
+    root = parent or project.layerTreeRoot()
     title = "Экскурсия: %s" % tour.place.name
     old = root.findGroup(title)
     if old:
         for layer in old.findLayers():
             project.removeMapLayer(layer.layerId())
         root.removeChildNode(old)
-    group = root.insertGroup(0, title)
+    group = root.insertGroup(0 if parent is None else len(root.children()), title)
     vectors = group.addGroup("Векторные данные")
     rasters = group.addGroup("Растры и подложки")
     styles = {"stops": style_stops, "object": style_object, "others": style_others,
@@ -996,3 +999,97 @@ def render(layout, dpi=130, quality=88):
     exporter = QgsLayoutExporter(layout)
     image = exporter.renderPageToImage(0, QSize(), dpi)
     return image_bytes(image, "JPG", quality)
+
+
+# --- Поездка по региону ---
+
+def build_trip_layers(trip):
+    layers = {}
+    rows = []
+    for number, drive in enumerate(trip.drives, 1):
+        if drive and drive.ok and len(drive.coords) > 1:
+            rows.append((line(drive.coords), {"leg": number, "start": drive.start_name,
+                                              "km": round(drive.distance_m / 1000, 1),
+                                              "hours": round(drive.duration_s / 3600, 2)}))
+    layers["transfers"] = memory_layer("LineString", "Переезды", [
+        ("leg", int), ("start", str), ("km", float), ("hours", float)], rows)
+    layers["bases"] = memory_layer("Point", "Объекты поездки", [
+        ("order", int), ("name", str), ("kind", str), ("objects", int), ("walk_km", float)],
+        [(point(t.place.lon, t.place.lat), {"order": n, "name": t.place.name, "kind": t.place.kind,
+                                            "objects": len(t.stops) - 1,
+                                            "walk_km": round(t.totals.get("walk_m", 0) / 1000, 1)})
+         for n, t in enumerate(trip.tours, 1)])
+    layers["home"] = memory_layer("Point", "Начало и конец поездки", [("name", str)],
+                                  [(point(*trip.start), {"name": trip.start_name})])
+    lodging = [(point(l["lon"], l["lat"]), {"segment": l["segment"], "label": l["label"], "name": l["name"],
+                                            "kind": l["kind"], "stars": l["stars"], "km": round(l["km"], 1),
+                                            "website": l["website"], "phone": l["phone"]})
+               for t in trip.tours for l in t.lodging]
+    if lodging:
+        layers["lodging"] = memory_layer("Point", "Ночлег", [
+            ("segment", str), ("label", str), ("name", str), ("kind", str), ("stars", int), ("km", float),
+            ("website", str), ("phone", str)], lodging)
+    return layers
+
+
+def style_bases(layer):
+    symbol, _ = numbered_marker(brand.PIN, 7.0, "to_string(\"order\")")
+    layer.renderer().setSymbol(symbol)
+    set_labels(layer, "name", 10, brand.PIN, True, distance=2.8)
+
+
+def style_home(layer):
+    layer.renderer().setSymbol(QgsMarkerSymbol.createSimple({
+        "name": "square", "color": brand.DRIVE, "outline_color": "white", "outline_width": "0.5", "size": "4.4"}))
+    set_labels(layer, "name", 9, brand.DRIVE, True)
+
+
+def add_trip_to_project(trip, layers, basemap, parent):
+    """Слои поездки — в начало группы поездки (над экскурсиями)."""
+    project = QgsProject.instance()
+    group = parent.insertGroup(0, "Маршрут поездки")
+    styles = {"bases": style_bases, "home": style_home, "lodging": style_lodging,
+              "transfers": style_drive}
+    added = {}
+    for key in ("bases", "home", "lodging", "transfers"):
+        layer = layers.get(key)
+        if layer is None:
+            continue
+        styles[key](layer)
+        project.addMapLayer(layer, False)
+        group.addLayer(layer)
+        added[key] = layer
+    if basemap in BASEMAPS:
+        base = basemap_layer(basemap)
+        if base:
+            project.addMapLayer(base, False)
+            group.addLayer(base)
+            added["basemap"] = base
+    return added
+
+
+def make_trip_layout(trip, added, basemap="light", project=None):
+    project = project or QgsProject.instance()
+    layout = new_layout(project, "%s — карта поездки" % trip.title)
+    keys = ["bases", "home", "lodging", "transfers"]
+    layers = [added[k] for k in keys if k in added] + ([added["basemap"]] if "basemap" in added else [])
+    km = sum(d.distance_m for d in trip.drives if d and d.ok)
+    frame(layout, trip.title, "%d %s · переезды %s · %d дн." % (
+        len(trip.tours), "объекта" if 1 < len(trip.tours) < 5 else "объектов", fmt_km(km), len(trip.days)),
+        "Карта поездки", attribution(trip.tours[0], basemap) if trip.tours else "")
+    points = [trip.start] + [t.place.point for t in trip.tours]
+    points += [c for d in trip.drives if d and d.ok for c in d.coords[::max(1, len(d.coords) // 200)]]
+    map_item = add_map(layout, layers, mercator_rect(padded(points, 0.08, 20000), project))
+    panel_heading(layout, "Условные обозначения", MAP_Y + 3)
+    legend_layers = [added[k] for k in keys if k in added]
+    add_legend(layout, map_item, legend_layers, PANEL_X + 3, MAP_Y + 10)
+    text_y = MAP_Y + 10 + legend_height(legend_layers)
+    panel_heading(layout, "План по дням", text_y)
+    lines = []
+    for day in trip.days:
+        lines.append("День %d: %s" % (day["number"], "; ".join(i.split(":")[0] for i in day["items"])))
+    add_label(layout, "\n".join(lines[:14]), PANEL_X + 4, text_y + 8, PANEL_W - 8, MAP_Y + MAP_H - text_y - 10,
+              7.2, False, brand.INK)
+    add_scalebar(layout, map_item, MAP_X + 3, MAP_Y + MAP_H - 11)
+    add_north(layout, map_item, MAP_X + MAP_W - 14, MAP_Y + 3)
+    return layout

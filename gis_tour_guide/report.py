@@ -775,7 +775,7 @@ def build_html(tour, images, pdf=False, basemap="light"):
     return "\n".join(b.out)
 
 
-def write_pdf(tour, images, path):
+def write_pdf(tour, images, path, html=None):
     """PDF A4 тем же содержимым (движок Qt — без браузера и сторонних библиотек)."""
     from qgis.PyQt.QtCore import QMarginsF, QSizeF, QUrl
     from qgis.PyQt.QtGui import QFont, QImage, QPageLayout, QPageSize, QTextDocument
@@ -791,13 +791,13 @@ def write_pdf(tour, images, path):
     px = 96 / 25.4
     document.setPageSize(QSizeF((210 - 24) * px, (297 - 26) * px))
     document.setDocumentMargin(0)
-    document.setHtml(build_html(tour, images, pdf=True))
+    document.setHtml(html or build_html(tour, images, pdf=True))
     printer = QPrinter(QPrinter.PrinterMode.HighResolution)
     printer.setOutputFormat(QPrinter.OutputFormat.PdfFormat)
     printer.setOutputFileName(path)
     printer.setPageLayout(QPageLayout(QPageSize(QPageSize.PageSizeId.A4), QPageLayout.Orientation.Portrait,
                                       QMarginsF(12, 12, 12, 14), QPageLayout.Unit.Millimeter))
-    printer.setDocName("%s — %s" % (tour.place.name, brand.NAME))
+    printer.setDocName("%s — %s" % (getattr(tour, "title", "") or tour.place.name, brand.NAME))
     document.print_(printer)
     return path
 
@@ -812,3 +812,97 @@ def fmt_t(value):
     if value is None:
         return "?"
     return "%+d" % round(value)
+
+
+# --- Отчёт поездки по региону ---
+
+def build_trip_html(trip, images, links, pdf=False, basemap="light"):
+    """Итог поездки: карта, план по дням, объекты со ссылками на их отчёты, переезды."""
+    from . import trip as trip_module
+    totals = trip_module.totals(trip)
+    b = Builder(trip.tours[0] if trip.tours else None, images, pdf, None if pdf else basemap)
+    b.add("<!DOCTYPE html><html lang='ru'><head><meta charset='utf-8'>",
+          "<meta name='viewport' content='width=device-width,initial-scale=1'>",
+          "<title>%s</title><style>%s</style>%s</head><body>" % (
+              esc(trip.title), PDF_CSS if pdf else WEB_CSS, webmap.assets() if b.basemap is not None else ""))
+    chips = ["%d %s" % (len(trip.tours), plural(len(trip.tours), "объект", "объекта", "объектов")),
+             "%d %s" % (len(trip.days), plural(len(trip.days), "день", "дня", "дней")),
+             "переезды %s, ~%s" % (fmt_km(totals["drive_m"]), fmt_hours(totals["drive_h"])),
+             "пешком %s" % fmt_km(totals["walk_m"])]
+    if trip.date:
+        chips.insert(0, "с " + datetime.date.fromisoformat(trip.date).strftime("%d.%m.%Y"))
+    logo = b.img("logo", 56) if pdf else b.img("logo", extra=" width='64'")
+    if pdf:
+        b.add("<table width='100%%' cellpadding='10' cellspacing='0'><tr><td bgcolor='%s' width='70'>%s</td>"
+              "<td bgcolor='%s'><span class='brand'>%s</span><br><span class='title'>%s</span><br>"
+              "<span class='chips'>%s</span></td></tr></table>" % (
+                  brand.GREEN, logo, brand.GREEN, esc(brand.NAME.upper() + " · ПОЕЗДКА ПО РЕГИОНУ"),
+                  esc(trip.title.replace("Поездка: ", "")), esc(" · ".join(chips))))
+    else:
+        b.add("<div class='top'><table><tr><td style='padding-right:14px'>%s</td><td><div class='brand'>%s</div>"
+              "<div class='title'>%s</div><div class='chips'>%s</div></td></tr></table></div>" % (
+                  logo, esc(brand.NAME.upper() + " · ПОЕЗДКА ПО РЕГИОНУ"),
+                  esc(trip.title.replace("Поездка: ", "")), "".join("<span>%s</span>" % esc(c) for c in chips)))
+    for name in trip.missing:
+        b.add(b.warn("«%s» не найдено — объект не вошёл в поездку." % name))
+
+    b.h2("Маршрут поездки", first=True)
+    if pdf or b.basemap is None:
+        b.add(b.figure("map:trip"))
+    else:
+        b.add(webmap.block("trip", trip, basemap, trip.title, "карта поездки",
+                           images.src("map:trip") if images.has("map:trip") else ""))
+    b.add("<p class='small'>Начало и конец: %s (%s).</p>" % (esc(trip.start_name), esc(trip.start_reason)))
+    b.add(b.tiles([(str(len(trip.days)), plural(len(trip.days), "день", "дня", "дней")),
+                   (str(len(trip.tours)), "объектов поездки"),
+                   (fmt_km(totals["drive_m"]), "за рулём"), (fmt_hours(totals["drive_h"]), "в дороге"),
+                   (fmt_km(totals["walk_m"]), "пешком")]))
+
+    b.h2("План по дням")
+    b.add(b.grid(["День", "Что делаем"], [["День %d" % d["number"], "<br>".join(esc(i) for i in d["items"])]
+                                          for d in trip.days]))
+
+    b.h2("Объекты поездки")
+    for number, (tour, link) in enumerate(zip(trip.tours, links), 1):
+        t = tour.totals
+        facts = "%s · %s · %d %s · %s пешком, ~%s с осмотром" % (
+            tour.place.kind or "объект", brand.MODES[tour.mode].lower(), len(tour.stops) - 1,
+            plural(len(tour.stops) - 1, "точка", "точки", "точек"), fmt_km(t.get("walk_m", 0)),
+            fmt_hours(t.get("hours_walk", 0) + t.get("hours_stops", 0)))
+        stops = ", ".join(s.name for s in tour.stops[1:])
+        lodging = "; ".join("%s — %s (%s)" % (l["label"].split(" (")[0], l["name"], l["kind"]) for l in tour.lodging)
+        text_ = "<h3>%s%s</h3><p class='small'>%s</p><p>Маршрут: %s</p>%s<p>%s</p>" % (
+            b.num(number, "main"), esc(tour.place.name), esc(facts), esc(stops),
+            "<p class='small'>Ночлег: %s</p>" % esc(lodging) if lodging else "",
+            b.link(link, "Подробный отчёт: %s" % link))
+        if pdf:      # QTextDocument плохо обтекает картинки — текст и карта в две колонки
+            b.add("<table width='100%%' cellspacing='0' cellpadding='0'><tr><td valign='top'>%s</td>"
+                  "<td width='310' valign='top' align='right'>%s</td></tr></table>" % (
+                      text_, b.img("map:scheme%d" % number, 300, "poiimg")))
+        else:
+            b.add("<div class='card'>%s%s</div>" % (
+                b.img("map:scheme%d" % number, 300, "poiimg", " align='right'"), text_))
+        for warning in tour.warnings[:3]:
+            b.add(b.warn("%s: %s" % (tour.place.name, warning)))
+
+    b.h2("Переезды")
+    rows = []
+    targets = [t.place.name for t in trip.tours] + ([trip.start_name] if trip.loop else [])
+    for drive, target in zip(trip.drives, targets):
+        if drive and drive.ok:
+            roads = ", ".join(label for label, _m in drive.roads[:3])
+            rows.append([esc("%s → %s" % (drive.start_name, target)), fmt_km(drive.distance_m),
+                         fmt_hours(drive.duration_s / 3600.0), esc(roads)])
+        elif drive is not None:
+            rows.append([esc("→ %s" % target), "—", "—", esc(drive.note or "на общественном транспорте")])
+    b.add(b.grid(["Откуда → куда", "Км", "Время", "Дороги"], rows))
+    note = ("Сведения собраны автоматически из открытых источников плагином «%s» для QGIS %s. "
+            "Подробности, советы, фото и источники — в отчётах по каждому объекту." % (
+                brand.NAME, datetime.date.today().strftime("%d.%m.%Y")))
+    b.add("<p class='small'>%s</p>" % esc(note) if pdf else "<div class='foot'>%s</div>" % esc(note))
+    b.add("</body></html>")
+    return "\n".join(b.out)
+
+
+def write_trip_pdf(trip, images, links, path):
+    return write_pdf(trip, images, path, html=build_trip_html(trip, images, links, pdf=True))
