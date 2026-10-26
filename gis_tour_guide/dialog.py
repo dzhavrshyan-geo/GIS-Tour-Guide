@@ -488,7 +488,11 @@ class TourGuideDialog(QDialog):
             text = "%s — %s, %s" % (poi.name, poi.kind.lower(), fmt_km(poi.distance_km * 1000))
             if poi.popularity >= 1:
                 text += " · %d просм./день" % poi.popularity
+            if poi.members:
+                text += " · +%d рядом" % len(poi.members)
             tip = poi.description or poi.kind
+            if poi.members:
+                tip += "\nВ той же остановке: " + ", ".join(m.name for m in poi.members)
             items.append((text, poi.uid, poi.selected, tip))
         self.checklist.set_items(items)
         mode = brand.MODES[tour.mode].lower()

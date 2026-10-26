@@ -648,3 +648,42 @@ def lodging(http, lon, lat, radii_km=(5, 20, 50)):
         used.add(item["url"])
         result.append(item)
     return result
+
+
+# --- Объединение близких объектов в одну остановку ---
+
+GROUP_RADIUS_M = {"nature": 700, "urban": 150}
+
+
+def name_words(text):
+    """Значимые слова (от 5 букв) — «кратер», «горелый», «пещера»…"""
+    return {w[:6] for w in norm_name(text).split() if len(w) >= 5}
+
+
+def related(leader, other):
+    if leader.category and leader.category == other.category:
+        return True
+    if name_words(leader.name) & name_words(other.name):
+        return True
+    # «кратер вулкана Горелый» относится к вулкану Горелый
+    return bool(name_words(leader.name) & name_words(other.description))
+
+
+def group_close(main, pois, mode="nature"):
+    """Близкие и родственные объекты (кратеры одного вулкана, пещеры одного массива)
+    сливаются в одну остановку: главный — самый популярный, остальные — в .members."""
+    radius = GROUP_RADIUS_M.get(mode, 500)
+    leaders = [main]
+    for poi in pois:          # pois уже по популярности
+        target = None
+        for leader in leaders:
+            if geo.dist_m(leader.point, poi.point) <= radius and related(leader, poi):
+                target = leader
+                break
+        if target is None:
+            leaders.append(poi)
+        else:
+            target.members.append(poi)
+            if target is not main:
+                target.popularity = max(target.popularity, poi.popularity)
+    return leaders[0], leaders[1:]

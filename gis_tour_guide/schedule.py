@@ -17,8 +17,11 @@ def visit_hours(poi, mode):
     if poi.category == "start":
         return 0.0
     if mode == "urban":
-        return osm.VISIT_MINUTES.get(poi.category, 20) / 60.0
-    return STOP_MINUTES / 60.0
+        own = osm.VISIT_MINUTES.get(poi.category, 20)
+        extra = sum(osm.VISIT_MINUTES.get(m.category, 20) // 2 for m in poi.members)
+    else:
+        own, extra = STOP_MINUTES, 10 * len(poi.members)    # соседние кратеры, пещеры и т. п.
+    return (own + extra) / 60.0
 
 
 def daylight(tour):

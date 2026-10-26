@@ -117,6 +117,11 @@ def build_layers(tour):
                                      "popularity": round(p.popularity, 1),
                                      "distance_km": round(p.distance_km, 2), "url": p.url})
               for p in tour.candidates if not p.order and not p.is_main]
+    for stop in tour.stops:
+        others += [(point(m.lon, m.lat), {"name": m.name, "kind": "%s · у точки %d" % (m.kind, stop.order),
+                                          "popularity": round(m.popularity, 1),
+                                          "distance_km": round(m.distance_km, 2), "url": m.url})
+                   for m in stop.members]
     layers["others"] = memory_layer("Point", "Другие объекты рядом", [
         ("name", str), ("kind", str), ("popularity", float), ("distance_km", float), ("url", str)],
         others)

@@ -168,8 +168,10 @@ class Planner:
 
         self.stage("popular")
         self.soft("Популярность", wiki.popularity, self.http, [main] + candidates, self.s.lang)
-        tour.candidates = [main] + osm.rank(candidates)
-        self.log("Найдено объектов рядом: %d" % len(candidates))
+        main, grouped = osm.group_close(main, osm.rank(candidates), tour.mode)
+        tour.candidates = [main] + grouped
+        self.log("Найдено объектов рядом: %d (после объединения близких — %d)" % (
+            len(candidates), len(grouped)))
         self.stage("popular", 1)
         tour.protected = [] if tour.urban else around.get("protected") or []
         tour.failed_sources = [f for f in self.failed if f in ("OpenStreetMap", "Статьи Википедии")]
@@ -446,7 +448,8 @@ class Planner:
 
     def job_texts(self, tour):
         place = tour.place
-        self.soft("Описания", wiki.fill_details, self.http, tour.stops[1:], self.s.lang)
+        members = [m for stop in tour.stops for m in stop.members]
+        self.soft("Описания", wiki.fill_details, self.http, tour.stops[1:] + members, self.s.lang)
         if tour.urban:
             names = [place.city, place.name, place.region, tour.region_name]
         else:

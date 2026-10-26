@@ -227,6 +227,22 @@ class HedgedOverpassTest(unittest.TestCase):
         self.assertEqual(osm.segment({"tourism": "wilderness_hut"}), "budget")
 
 
+class GroupingTest(unittest.TestCase):
+
+    def test_close_related_objects_become_one_stop(self):
+        main = Poi("main", "Горелый", 158.030, 52.558, category="volcano")
+        crater = Poi("a", "Кратер Активный", 158.026, 52.562, category="attraction",
+                     description="кратер вулкана Горелый", popularity=15)
+        cave1 = Poi("b", "Пещера Большая", 158.100, 52.500, category="cave", popularity=5)
+        cave2 = Poi("c", "Пещера Малая", 158.103, 52.501, category="cave", popularity=1)
+        far_cave = Poi("d", "Пещера Дальняя", 158.200, 52.500, category="cave")
+        lake = Poi("e", "Озеро", 158.101, 52.5005, category="lake")
+        leader, rest = osm.group_close(main, [crater, cave1, cave2, far_cave, lake])
+        self.assertEqual([m.name for m in leader.members], ["Кратер Активный"])
+        self.assertEqual([p.name for p in rest], ["Пещера Большая", "Пещера Дальняя", "Озеро"])
+        self.assertEqual([m.name for m in rest[0].members], ["Пещера Малая"])
+
+
 class RoutingTest(unittest.TestCase):
 
     def test_road_summary_merges_and_drops_ramps(self):

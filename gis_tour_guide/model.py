@@ -54,6 +54,7 @@ class Poi:
     is_main: bool = False
     order: int = 0              # номер на маршруте (0 — старт или не на маршруте)
     photos: list = field(default_factory=list)
+    members: list = field(default_factory=list)   # объекты рядом, объединённые в эту остановку
 
     @property
     def point(self):

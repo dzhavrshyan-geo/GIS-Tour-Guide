@@ -181,6 +181,10 @@ def gpx_text(tour):
         lines.append('<wpt lat="%.6f" lon="%.6f">%s<name>%s</name><desc>%s</desc></wpt>' % (
             poi.lat, poi.lon, "<ele>%.0f</ele>" % poi.elevation if poi.elevation is not None else "",
             esc("%d. %s" % (poi.order, poi.name) if poi.order else poi.name), esc(poi.kind)))
+    for stop in tour.stops:
+        for member in stop.members:
+            lines.append('<wpt lat="%.6f" lon="%.6f"><name>%s</name><desc>%s</desc></wpt>' % (
+                member.lat, member.lon, esc("%d. %s" % (stop.order, member.name)), esc(member.kind)))
     for item in tour.lodging:
         lines.append('<wpt lat="%.6f" lon="%.6f"><name>%s</name><desc>%s</desc></wpt>' % (
             item["lat"], item["lon"], esc("Ночлег: " + item["name"]), esc(item["label"])))
@@ -540,6 +544,12 @@ def stops_section(b):
             site = tags.get("website") or tags.get("contact:website")
             if site:
                 extra.append("Сайт: " + b.link(site))
+        if poi.members:
+            extra.append("Рядом, в той же остановке: " + "; ".join(
+                "<b>%s</b> (%s)%s" % (esc(m.name), esc(m.kind.lower()),
+                                      " — " + esc(clip(m.extract or m.description, 160))
+                                      if (m.extract or m.description) else "")
+                for m in poi.members))
         photos = ", ".join("№%d" % p.number for p in poi.photos)
         if photos:
             extra.append("Фото: " + photos)

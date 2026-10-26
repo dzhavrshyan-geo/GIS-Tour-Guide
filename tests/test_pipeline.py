@@ -125,6 +125,10 @@ class NatureTest(unittest.TestCase):
         self.assertEqual(names[1], "Вилючинский водопад")
         self.assertAlmostEqual(self.tour.candidates[1].popularity, 300)
         self.assertAlmostEqual(self.tour.candidates[0].popularity, 120)
+        # кратер вулкана в 500 м — не отдельная точка, а часть остановки «Горелый»
+        main = self.tour.candidates[0]
+        self.assertEqual([m.name for m in main.members], ["Кратер Активный"])
+        self.assertNotIn("Кратер Активный", names)
 
     def test_selection_and_order(self):
         tour = self.tour
@@ -252,6 +256,7 @@ class NatureTest(unittest.TestCase):
         self.assertIn("Лист для печати", html)
         self.assertIn("id='photo-1'", html)
         self.assertIn("Ночлег и план по дням", html)
+        self.assertIn("Рядом, в той же остановке: <b>Кратер Активный</b>", html)
         self.assertIn("Паратунка Резорт", html)
         self.assertGreater(os.path.getsize(pdf), 50000)
         with open(pdf, "rb") as handle:
@@ -295,7 +300,9 @@ class UrbanTest(unittest.TestCase):
     def test_top_by_popularity(self):
         chosen = [p.name for p in self.tour.candidates[1:] if p.selected]
         self.assertEqual(chosen, ["Красная площадь", "Собор Василия Блаженного", "Большой театр",
-                                  "Царь-пушка", "Государственный исторический музей"])
+                                  "Государственный исторический музей", "Большой Кремлёвский дворец"])
+        # Царь-пушка — в 110 м, внутри Кремля: одна остановка с главным объектом
+        self.assertEqual([m.name for m in self.tour.candidates[0].members], ["Царь-пушка"])
         names = [p.name for p in self.tour.candidates]
         self.assertNotIn("Доска", names)                       # мемориальные доски не берём
         self.assertNotIn("Церковь без статьи", names)          # в городе — только со статьёй
