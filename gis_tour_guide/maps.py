@@ -14,7 +14,8 @@ from qgis.core import (
     QgsLayoutItemAttributeTable, QgsLayoutItemLabel, QgsLayoutItemLegend, QgsLayoutItemMap,
     QgsLayoutItemMapOverview, QgsLayoutItemPage, QgsLayoutItemPicture, QgsLayoutItemScaleBar,
     QgsLayoutItemShape, QgsLayoutMeasurement, QgsLayoutPoint, QgsLayoutSize, QgsLayoutTable,
-    QgsLayoutTableStyle, QgsLegendStyle, QgsMapLayerType, QgsLineSymbol, QgsMarkerLineSymbolLayer, QgsMarkerSymbol,
+    QgsLayoutTableStyle, QgsLegendStyle, QgsMapLayerStyle, QgsMapLayerType, QgsPointDisplacementRenderer,
+    QgsSingleSymbolRenderer, QgsLineSymbol, QgsMarkerLineSymbolLayer, QgsMarkerSymbol,
     QgsPalLayerSettings, QgsPointXY, QgsPrintLayout, QgsProject, QgsProperty, QgsRasterLayer,
     QgsRasterShader, QgsRectangle, QgsRendererCategory, QgsSimpleLineSymbolLayer, QgsSimpleMarkerSymbolLayer,
     QgsSingleBandPseudoColorRenderer, QgsSymbolLayer, QgsTextBufferSettings, QgsTextFormat,
@@ -23,8 +24,8 @@ from qgis.core import (
 from qgis.PyQt.QtCore import QSize, QVariant
 from qgis.PyQt.QtGui import QColor, QFont, QPainter
 
-from . import brand
-from .geo import bbox_of, bbox_union
+from . import brand, osm
+from .geo import M_PER_DEG_LAT, bbox_of, bbox_union, m_per_deg_lon
 from .text import fmt_hours, fmt_km
 
 WGS84 = QgsCoordinateReferenceSystem("EPSG:4326")
@@ -151,10 +152,14 @@ def build_layers(tour):
             [(point(s.lon, s.lat), {"name": s.name, "role": s.role, "place": s.place,
                                     "population": s.population}) for s in tour.settlements])
 
-    west, south, east, north = tour.bbox
-    zone = QgsGeometry.fromRect(QgsRectangle(west, south, east, north))
-    layers["zone"] = memory_layer("Polygon", "Зона поиска ±%s км" % ("%g" % tour.half_km),
-                                  [("half_km", float)], [(zone, {"half_km": float(tour.half_km)})])
+    if tour.lodging:
+        layers["lodging"] = memory_layer("Point", "Ночлег", [
+            ("segment", str), ("label", str), ("name", str), ("kind", str), ("stars", int),
+            ("km", float), ("website", str), ("phone", str)],
+            [(point(l["lon"], l["lat"]), {"segment": l["segment"], "label": l["label"], "name": l["name"],
+                                          "kind": l["kind"], "stars": l["stars"], "km": round(l["km"], 1),
+                                          "website": l["website"], "phone": l["phone"]})
+             for l in tour.lodging])
     if tour.region_geojson:
         geometry = geojson_geometry(tour.region_geojson)
         if geometry and not geometry.isEmpty():
@@ -296,6 +301,7 @@ def style_stops(layer):
     inner.setDataDefinedProperty(symbol_property("FillColor"), QgsProperty.fromExpression(
         "if(\"is_main\", '%s', if(\"order\" = 0, '%s', '%s'))" % (brand.PIN, brand.SLATE, brand.GREEN)))
     layer.renderer().setSymbol(symbol)
+    displaced(layer, 3.5)
     set_labels(layer, "name", 8.5, brand.GREEN_DARK, True, distance=2.4)
     layer.setMapTipTemplate(
         "<b style='color:%s'>[%% if(\"order\"=0,'Старт',to_string(\"order\")) %%]. [%% \"name\" %%]</b><br>"
@@ -385,10 +391,34 @@ def style_settlements(layer):
                dd_bold="\"role\" = 'capital'")
 
 
-def style_zone(layer):
-    layer.renderer().setSymbol(QgsFillSymbol.createSimple({
-        "color": "0,0,0,0", "outline_color": brand.GREEN, "outline_width": "0.5",
-        "outline_style": "dash"}))
+def displaced(layer, tolerance_mm=4.0):
+    """Близкие точки раздвигаются кольцом вокруг своего места — номера не налезают друг на друга."""
+    inner = layer.renderer().clone()
+    renderer = QgsPointDisplacementRenderer()
+    renderer.setEmbeddedRenderer(inner)
+    renderer.setTolerance(tolerance_mm)
+    renderer.setToleranceUnit(enum(QgsUnitTypes, "RenderMillimeters", "RenderUnit.Millimeters"))
+    renderer.setPlacement(enum(QgsPointDisplacementRenderer, "Ring", "Placement.Ring"))
+    renderer.setCircleWidth(0.3)
+    renderer.setCircleColor(QColor(brand.MUTED))
+    renderer.setCircleRadiusAddition(0.6)
+    renderer.setCenterSymbol(QgsMarkerSymbol.createSimple({
+        "name": "circle", "color": brand.INK, "outline_style": "no", "size": "1.0"}))
+    layer.setRenderer(renderer)
+
+
+def style_lodging(layer):
+    symbols = {"premium": "#8e5a1e", "middle": brand.GREEN, "budget": brand.SLATE}
+    categories = []
+    for key, label in osm.SEGMENTS:
+        symbol = QgsMarkerSymbol.createSimple({
+            "name": "square", "color": symbols[key], "outline_color": "white", "outline_width": "0.5",
+            "size": "3.6"})
+        symbol.appendSymbolLayer(QgsSimpleMarkerSymbolLayer.create({
+            "name": "triangle", "color": "white", "outline_style": "no", "size": "1.8"}))
+        categories.append(QgsRendererCategory(key, symbol, "Ночлег: " + label.lower()))
+    layer.setRenderer(QgsCategorizedSymbolRenderer("segment", categories))
+    set_labels(layer, "name", 7, brand.INK, italic=True, distance=1.6)
 
 
 def style_region(layer):
@@ -399,6 +429,7 @@ def style_region(layer):
 def style_photos(layer):
     symbol, _ = numbered_marker(brand.PHOTO, 4.6, "to_string(\"number\")", halo=1.0, font_size=2.6)
     layer.renderer().setSymbol(symbol)
+    displaced(layer, 5.0)
     layer.setMapTipTemplate(
         "<b>Фото [% \"number\" %] · [% \"object\" %]</b><br>"
         "[% if(\"image\" <> '', '<img src=\"' || \"image\" || '\" width=\"320\"><br>', '') %]"
@@ -426,8 +457,8 @@ def style_dem(layer, kind):
     layer.setRenderer(QgsSingleBandPseudoColorRenderer(provider, 1, raster_shader))
 
 
-VECTOR_ORDER = ["stops", "photos", "object", "others", "settlements", "town", "walk", "drive",
-                "zone", "region"]
+VECTOR_ORDER = ["stops", "photos", "object", "lodging", "others", "settlements", "town", "walk",
+                "drive", "region"]
 
 
 def basemap_layer(key):
@@ -456,7 +487,7 @@ def add_to_project(tour, layers, basemap="topo", project=None):
     rasters = group.addGroup("Растры и подложки")
     styles = {"stops": style_stops, "object": style_object, "others": style_others,
               "walk": lambda layer: style_walk(layer, tour.urban), "drive": style_drive,
-              "town": style_town, "settlements": style_settlements, "zone": style_zone,
+              "town": style_town, "settlements": style_settlements, "lodging": style_lodging,
               "region": style_region, "photos": style_photos}
     added = {}
     for key in VECTOR_ORDER:
@@ -785,20 +816,43 @@ def area(box):
     return max(box[2] - box[0], 1e-9) * max(box[3] - box[1], 1e-9)
 
 
+def padded(points, share=0.12, minimum_m=600):
+    """Охват точек с полями: share от размера, но не меньше minimum_m."""
+    west, south, east, north = bbox_of(points)
+    width = (east - west) * m_per_deg_lon((south + north) / 2)
+    height = (north - south) * M_PER_DEG_LAT
+    margin = max(max(width, height) * share, minimum_m / 2.0)
+    return bbox_of(points, margin)
+
+
 def scheme_extent(tour):
+    """Маршрут и его точки — без зоны поиска, чтобы схема была крупнее."""
     coords = [c for leg in tour.legs for s in leg.segments for c in s.coords]
-    box = tour.bbox
-    if coords:
-        route_box = bbox_of(coords, 300 if not tour.urban else 150)
-        # в городе зона бывает куда больше прогулки — показываем саму прогулку
-        box = route_box if tour.urban else bbox_union(box, route_box)
-    return box
+    coords += [s.point for s in tour.stops]
+    if not coords:
+        return tour.bbox
+    return padded(coords, 0.14, 400 if tour.urban else 1500)
 
 
 def photos_extent(tour):
     points = [(p.lon, p.lat) for p in tour.photos if p.lon is not None]
-    points += [s.point for s in tour.stops]
-    return bbox_of(points, 400 if tour.urban else 1200)
+    if not points:
+        return scheme_extent(tour)
+    return padded(points, 0.18, 300 if tour.urban else 1000)
+
+
+def small_stops_style(layer):
+    """Стиль точек маршрута для карты фотографий: мелкие, без номеров (не спорят с номерами фото)."""
+    current = QgsMapLayerStyle()
+    current.readFromLayer(layer)
+    layer.setRenderer(QgsSingleSymbolRenderer(QgsMarkerSymbol.createSimple({
+        "name": "circle", "color": brand.GREEN, "outline_color": "white", "outline_width": "0.4",
+        "size": "2.4"})))
+    layer.setLabelsEnabled(False)          # имена — в таблице, номера фото не перекрываем
+    small = QgsMapLayerStyle()
+    small.readFromLayer(layer)
+    current.writeToLayer(layer)
+    return small.xmlData()
 
 
 def drive_text(tour):
@@ -833,7 +887,7 @@ def make_layouts(tour, added, basemap="topo", project=None):
 
     # 1. Обзорная карта региона
     layout = new_layout(project, "Экскурсия «%s» — 1. Обзорная карта" % name)
-    keys = ["object", "town", "settlements", "drive", "zone", "region"]
+    keys = ["object", "town", "settlements", "lodging", "drive", "region"]
     layers = [added[k] for k in keys if k in added] + over_base
     frame(layout, "%s — как добраться" % name, "%s · %s" % (region, mode), "Лист 1 · обзорная карта",
           attribution(tour, over_key))
@@ -865,7 +919,7 @@ def make_layouts(tour, added, basemap="topo", project=None):
 
     # 2. Карта-схема маршрута
     layout = new_layout(project, "Экскурсия «%s» — 2. Карта-схема маршрута" % name)
-    keys = ["stops", "others", "walk"] + ([] if tour.urban else ["zone"])
+    keys = ["stops", "others", "walk"]
     layers = [added[k] for k in keys if k in added] + relief + scheme_base
     t = tour.totals
     sub = "%s · %s, %s, ~%s пешком" % (mode, "кольцевой" if tour.loop else "в одну сторону",
@@ -892,12 +946,16 @@ def make_layouts(tour, added, basemap="topo", project=None):
         layout = new_layout(project, "Экскурсия «%s» — 3. Карта-схема фотографий" % name)
         keys = ["photos", "stops", "walk"]
         layers = [added[k] for k in keys if k in added] + relief + scheme_base
+        overrides = {added["stops"].id(): small_stops_style(added["stops"])} if "stops" in added else {}
         frame(layout, "%s — где сделаны фотографии" % name,
               "%d фото · номера совпадают с отчётом" % added["photos"].featureCount(),
               "Лист 3 · карта-схема фотографий", attribution(tour, basemap) + "; фото — Викисклад")
         map_item = add_map(layout, layers, mercator_rect(photos_extent(tour), project))
+        if overrides:
+            map_item.setLayerStyleOverrides(overrides)
+            map_item.setKeepLayerStyles(True)
         panel_heading(layout, "Условные обозначения", MAP_Y + 3)
-        legend_layers = [added[k] for k in keys if k in added]
+        legend_layers = [added[k] for k in ("photos", "walk") if k in added]
         add_legend(layout, map_item, legend_layers, PANEL_X + 3, MAP_Y + 10)
         table_y = MAP_Y + 10 + legend_height(legend_layers)
         panel_heading(layout, "Фотографии", table_y)

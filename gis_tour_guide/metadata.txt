@@ -2,7 +2,7 @@
 name=ГИС-экскурсовод
 qgisMinimumVersion=3.22
 description=Экскурсия к туристическому объекту по названию: подбор самых популярных попутных объектов, маршрут по тропам, улицам и рельефу, три фирменные карты, отчёт HTML и PDF, трек GPX
-version=0.2.0
+version=0.3.0
 author=Robert Dzhavrhsyan
 email=dzhavrshyan.gg@gmail.com
 

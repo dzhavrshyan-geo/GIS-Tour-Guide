@@ -18,11 +18,11 @@ from qgis.PyQt.QtWidgets import (
     QToolButton, QVBoxLayout, QWidget,
 )
 
-from . import brand, maps, osm, report
+from . import brand, maps, osm, report, schedule
 from .planner import COLLECT_STAGES, PLAN_STAGES, Settings
 from .progress import ProgressDialog
 from .task import FINISH_STAGES, TASK_STAGES, CollectTask, GeocodeTask, TourTask
-from .text import fmt_km, slug
+from .text import fmt_hours, fmt_km, slug
 from .widgets import CheckableComboBox
 
 KEY = "gis_tour_guide/"
@@ -99,6 +99,8 @@ class TourGuideDialog(QDialog):
         outer.addWidget(self.status)
         self.load_settings()
         self.update_state()
+        self.date.dateChanged.connect(self.update_estimate)
+        self.loop.currentIndexChanged.connect(self.update_estimate)
 
     # --- Разделы окна ---
 
@@ -158,11 +160,17 @@ class TourGuideDialog(QDialog):
         self.checklist.placeholder = "Сначала подберите попутные объекты"
         self.checklist.update_text()
         self.checklist.changed.connect(self.update_state)
+        self.checklist.changed.connect(self.update_estimate)
         form.addRow("Посетить:", self.checklist)
         self.neighbours_hint = QLabel("Популярность — по просмотрам статей Википедии за месяц.")
         self.neighbours_hint.setObjectName("Hint")
         self.neighbours_hint.setWordWrap(True)
         form.addRow(self.neighbours_hint)
+        self.estimate_label = QLabel("")
+        self.estimate_label.setObjectName("PlaceInfo")
+        self.estimate_label.setWordWrap(True)
+        self.estimate_label.setVisible(False)
+        form.addRow(self.estimate_label)
         return box
 
     def build_trip(self):
@@ -329,6 +337,7 @@ class TourGuideDialog(QDialog):
         place = self.current_place()
         self.collected = None
         self.checklist.set_items([])
+        self.update_estimate()
         if place is None:
             self.place_info.setText("Введите название и нажмите «Найти».")
         else:
@@ -345,6 +354,7 @@ class TourGuideDialog(QDialog):
         if self.collected is not None:
             self.collected = None
             self.checklist.set_items([])
+            self.update_estimate()
             self.neighbours_hint.setText("Параметры поиска изменились — подберите объекты заново.")
         self.update_state()
 
@@ -463,6 +473,9 @@ class TourGuideDialog(QDialog):
             self.collected = tour
             self.fill_checklist(tour)
             self.progress.finish("Подобрано объектов: %d" % (len(tour.candidates) - 1))
+            if self.offer_wider_zone(tour):
+                self.collect(then)
+                return
             if callable(then):
                 then()
             else:
@@ -481,11 +494,54 @@ class TourGuideDialog(QDialog):
             items.append((text, poi.uid, poi.selected, tip))
         self.checklist.set_items(items)
         mode = brand.MODES[tour.mode].lower()
-        self.neighbours_hint.setText(
-            "Найдено %d · %s · отмечены %d самых популярных (по просмотрам статей Википедии). "
-            "Снимите или поставьте галочки в списке." % (len(items), mode,
-                                                         len(self.checklist.checked_data())))
+        text = ("Найдено %d · %s · отмечены %d самых популярных (по просмотрам статей Википедии). "
+                "Снимите или поставьте галочки в списке." % (len(items), mode,
+                                                             len(self.checklist.checked_data())))
+        if tour.failed_sources:
+            text = ("⚠ Не ответили: %s — список может быть неполным, попробуйте подобрать ещё раз "
+                    "через минуту. " % ", ".join(tour.failed_sources)) + text
+        self.neighbours_hint.setText(text)
         self.update_state()
+        self.update_estimate()
+
+    def offer_wider_zone(self, tour):
+        """Мало нашли — предложить зону побольше (если причина не в упавшем сервере)."""
+        found = len(tour.candidates) - 1
+        km = self.half_km.value()
+        if found >= self.max_points.value() or tour.failed_sources or km >= 30:
+            return False
+        wider = min(30, max(km * 2, 10 if not tour.urban else 3))
+        answer = QMessageBox.question(
+            self, brand.NAME,
+            "В зоне ±%d км нашлось объектов: %d (вы просили %d).\nРасширить поиск до ±%d км?" % (
+                km, found, self.max_points.value(), wider))
+        if answer != QMessageBox.StandardButton.Yes:
+            return False
+        self.half_km.setValue(wider)
+        return True
+
+    def update_estimate(self, *_args):
+        """Оценка по прямым при каждом изменении галочек: успеть ли за день."""
+        tour = self.collected
+        if tour is None:
+            self.estimate_label.setVisible(False)
+            return
+        tour.date = self.date.date().toString("yyyy-MM-dd")
+        guess = schedule.estimate(tour, self.checklist.checked_data(), self.loop.currentIndex() == 0)
+        text = "Ориентировочно: %s пешком, ~%s в пути и ~%s на осмотр" % (
+            fmt_km(guess["walk_km"] * 1000), fmt_hours(guess["walk_h"]), fmt_hours(guess["visit_h"]))
+        if guess["drive_h"] > 0.2:
+            text += ", дорога ~%s в одну сторону" % fmt_hours(guess["drive_h"])
+        text += ". Светлого времени ~%s." % fmt_hours(guess["daylight"])
+        if guess["overnight"]:
+            text = ("⚠ Возможно, вы не успеете посмотреть все эти места за один день (~%d дн.). "
+                    "Советуем подыскать ночлег поблизости — в отчёте будет 3 ближайших варианта: "
+                    "дорогой, средний и бюджетный.\n" % guess["days"]) + text
+        self.estimate_label.setText(text)
+        self.estimate_label.setStyleSheet(
+            "background:#fff3d6; border-left:4px solid #e2a400; color:%s;" % brand.INK
+            if guess["overnight"] else "")
+        self.estimate_label.setVisible(True)
 
     def recheck_top(self, *_args):
         if self.collected is None:
@@ -495,6 +551,7 @@ class TourGuideDialog(QDialog):
             if len(top) < self.max_points.value() and poi.category not in ("camp", "picnic", "hut"):
                 top.append(poi.uid)
         self.checklist.set_checked(top)
+        self.update_estimate()
 
     # --- 3. Экскурсия ---
 
@@ -569,7 +626,7 @@ class TourGuideDialog(QDialog):
             images = report.gather(tour, pictures)
             html_path = os.path.join(folder, "report.html")
             with open(html_path, "w", encoding="utf-8") as handle:
-                handle.write(report.build_html(tour, images))
+                handle.write(report.build_html(tour, images, basemap=maps.overview_basemap(basemap)))
             progress.update_stage("report", 0.5)
             QgsApplication.processEvents()
             report.write_pdf(tour, images, os.path.join(folder, "report.pdf"))

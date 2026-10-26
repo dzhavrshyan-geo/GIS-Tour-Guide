@@ -180,6 +180,12 @@ class Tour:
     advice: list = field(default_factory=list)       # [(раздел, [пункты])]
     warnings: list = field(default_factory=list)
     sources: list = field(default_factory=list)      # [(название, ссылка, лицензия)]
+    failed_sources: list = field(default_factory=list)  # кто не ответил при подборе объектов
+    days: list = field(default_factory=list)         # [{"number", "stops": [номера], "hours", "km"}]
+    overnight: bool = False                          # за один день не успеть — нужен ночлег
+    day_hours: float = 0.0                           # дорога туда-обратно + маршрут + осмотр
+    daylight: float = 0.0
+    lodging: list = field(default_factory=list)      # 3 варианта ночлега по ценовым сегментам
     dem_name: str = ""
     date: str = ""                                   # YYYY-MM-DD
     people: int = 2

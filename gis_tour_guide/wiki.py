@@ -122,6 +122,11 @@ def search_places(http, query, lang="ru", limit=5):
 
 def nearby_articles(http, bbox, center, lang="ru", limit=100, mode="nature"):
     """Статьи о достопримечательностях в прямоугольнике — как Poi."""
+    return articles_from(nearby_pages(http, bbox, center, lang, limit), bbox, center, lang, mode)
+
+
+def nearby_pages(http, bbox, center, lang="ru", limit=100):
+    """Статьи с координатами в прямоугольнике — как есть (тип туризма ещё неизвестен)."""
     west, south, east, north = bbox
     base = {"action": "query", "generator": "geosearch", "ggslimit": limit,
             "prop": "coordinates|description|pageprops", "ppprop": "wikibase_item",
@@ -132,8 +137,12 @@ def nearby_articles(http, bbox, center, lang="ru", limit=100, mode="nature"):
     except NetError:  # слишком большой прямоугольник — круг 10 км
         data = api(http, host, dict(base, ggscoord="%.6f|%.6f" % (center[1], center[0]),
                                     ggsradius=10000))
+    return data.get("query", {}).get("pages", [])
+
+
+def articles_from(pages, bbox, center, lang="ru", mode="nature"):
     pois = []
-    for page in data.get("query", {}).get("pages", []):
+    for page in pages or []:
         coords = page.get("coordinates")
         description = page.get("description", "")
         if not coords or not is_sight(description):

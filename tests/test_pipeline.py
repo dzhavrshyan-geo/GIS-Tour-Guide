@@ -169,6 +169,40 @@ class NatureTest(unittest.TestCase):
             self.assertIn(key, keys)
             self.assertIn((key, 1), self.stages, key)
 
+    def test_collect_is_few_requests(self):
+        from fake_services import FakeHttp
+        from gis_tour_guide.planner import Planner, Settings
+        http = FakeHttp()
+        place = self.tour.place
+        Planner(http, Settings(half_km=10)).collect(place)
+        overpass = [c for c in http.calls if "interpreter" in c]
+        self.assertEqual(len(overpass), 2)          # общий запрос + населённые пункты региона
+
+    def test_overnight_days_and_lodging(self):
+        tour = self.tour
+        self.assertTrue(tour.overnight)
+        self.assertGreater(tour.day_hours, tour.daylight)
+        self.assertGreaterEqual(len(tour.days), 2)
+        visited = [n for day in tour.days for n in day["stops"]]
+        self.assertEqual(sorted(set(visited)), list(range(1, len(tour.stops))))
+        self.assertEqual([l["segment"] for l in tour.lodging], ["premium", "middle", "budget"])
+        self.assertEqual([l["name"] for l in tour.lodging],
+                         ["Паратунка Резорт", "Гостиница Термальная", "Стоянка у Горелого"])
+        text_ = "\n".join(item for _, items in tour.advice for item in items)
+        self.assertIn("не успеть посмотреть всё за один день", text_)
+        self.assertIn("Паратунка Резорт", text_)
+
+    def test_estimate_before_route(self):
+        from gis_tour_guide import schedule
+        tour = self.tour
+        chosen = [p.uid for p in tour.candidates[1:] if p.selected]
+        guess = schedule.estimate(tour, chosen)
+        self.assertTrue(guess["overnight"])
+        self.assertGreater(guess["drive_h"], 1)
+        self.assertGreater(guess["walk_km"], 5)
+        few = schedule.estimate(tour, [])
+        self.assertLess(few["walk_km"], guess["walk_km"])
+
     def test_advice(self):
         text_ = "\n".join(item for _, items in self.tour.advice for item in items)
         for needle in ("Бурый медведь", "Южно-Камчатский природный парк", "Магазинов поблизости нет",
@@ -200,6 +234,10 @@ class NatureTest(unittest.TestCase):
         self.assertEqual(added["settlements"].featureCount(), len(self.tour.settlements))
         self.assertEqual(sorted(c.value() for c in added["walk"].renderer().categories()),
                          ["offtrail", "trail"])
+        self.assertNotIn("zone", added)                       # зону поиска на карты не выносим
+        self.assertEqual(added["lodging"].featureCount(), 3)
+        self.assertEqual(added["photos"].renderer().type(), "pointDisplacement")
+        self.assertEqual(added["stops"].renderer().type(), "pointDisplacement")
         # отчёт — один HTML со всеми картинками внутри
         self.assertNotIn("src='photos/", html)
         self.assertGreaterEqual(html.count("data:image/jpeg;base64,"), 3 + len(self.tour.photos))
@@ -208,6 +246,13 @@ class NatureTest(unittest.TestCase):
                        "Суслики бегают у подножия", "Фотографии", "Источники", "региональный центр"):
             self.assertIn(needle, html)
         self.assertIn("Фото: №", html)
+        # интерактивные карты: Leaflet внутри файла, три карты, лист для печати рядом
+        self.assertIn("Leaflet", html)
+        self.assertEqual(html.count("gtMap('wm-"), 3)
+        self.assertIn("Лист для печати", html)
+        self.assertIn("id='photo-1'", html)
+        self.assertIn("Ночлег и план по дням", html)
+        self.assertIn("Паратунка Резорт", html)
         self.assertGreater(os.path.getsize(pdf), 50000)
         with open(pdf, "rb") as handle:
             self.assertEqual(handle.read(5), b"%PDF-")
@@ -268,7 +313,8 @@ class UrbanTest(unittest.TestCase):
         self.assertFalse(tour.profile)                          # без рельефа
         self.assertFalse(tour.observations)                     # без животных
         self.assertIn(("nature", -1), self.stages)
-        self.assertIn(("protected", -1), self.stages)
+        self.assertIn(("lodging", -1), self.stages)            # за день успеваем — ночлег не ищем
+        self.assertFalse(self.tour.overnight)
         self.assertGreater(tour.totals["hours_stops"], 2)       # музей и театр — дольше
 
     def test_urban_advice(self):
@@ -373,6 +419,8 @@ class DialogTest(unittest.TestCase):
             dialog.fill_checklist(collecting.tour)
             self.assertEqual(len(dialog.checklist.checked_data()), 3)
             self.assertIn("Отмечено 3 из", dialog.checklist.lineEdit().text())
+            self.assertTrue(dialog.estimate_label.isVisibleTo(dialog))
+            self.assertIn("Ориентировочно", dialog.estimate_label.text())
             dialog.max_points.setValue(1)                     # топ-1 без нового поиска
             self.assertEqual(dialog.checklist.checked_data(), [collecting.tour.candidates[1].uid])
             # изменили радиус — подобранные объекты сбрасываются

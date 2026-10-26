@@ -13,7 +13,7 @@ import datetime
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 
-from . import advice, extras, geo, geocode, osm, routing, terrain, tsp, wiki
+from . import advice, extras, geo, geocode, osm, routing, schedule, terrain, tsp, wiki
 from .model import DriveRoute, Leg, Poi, Tour
 from .net import Cancelled, NetError
 from .text import norm_name
@@ -25,13 +25,13 @@ URBAN_BUILDINGS = 150        # столько зданий в 700 м — уже 
 NO_DRIVE_KM = 30             # в городе ближе этого — без машины, на транспорте
 
 # (ключ, название, ожидаемая доля времени)
+# Первые три этапа идут одновременно
 COLLECT_STAGES = [
-    ("region", "Регион и населённые пункты", 3),
+    ("osm", "OpenStreetMap: объекты, посёлки, ООПТ", 5),
+    ("wiki", "Статьи Википедии рядом", 2),
+    ("region", "Регион и региональный центр", 3),
     ("kind", "Тип туризма: город или природа", 1),
-    ("osm", "Достопримечательности OpenStreetMap", 4),
-    ("wiki", "Статьи Википедии рядом", 3),
-    ("popular", "Популярность объектов", 3),
-    ("protected", "Охраняемые территории", 1),
+    ("popular", "Популярность объектов", 2),
 ]
 PLAN_STAGES = [
     ("start", "Откуда ехать и дорога", 4),
@@ -42,6 +42,7 @@ PLAN_STAGES = [
     ("weather", "Прогноз погоды", 1),
     ("photos", "Фотографии с Викисклада", 4),
     ("nature", "Животные и растения рядом", 2),
+    ("lodging", "Ночлег поблизости", 2),
     ("advice", "Советы: одежда, еда, безопасность", 1),
 ]
 
@@ -72,6 +73,7 @@ class Planner:
         self.elevation = elevation
         self.progress = progress or (lambda key, fraction: None)
         self.log = log or (lambda text: None)
+        self.failed = []             # источники, которые не ответили
 
     def stage(self, key, fraction=0.0):
         self.http.check()
@@ -87,6 +89,7 @@ class Planner:
             self.log("⚠ %s: %s" % (what, error))
         except Exception as error:  # noqa: BLE001 - неожиданный ответ сервиса
             self.log("⚠ %s: %s: %s" % (what, type(error).__name__, error))
+        self.failed.append(what)
         return None
 
     # --- Полный прогон (для тестов и простого использования) ---
@@ -118,59 +121,64 @@ class Planner:
                                                   place.display_name or place.source))
         tour.bbox = geo.bbox_around(place.lon, place.lat, self.s.half_km)
 
-        self.stage("region")
-        region = self.soft("Граница региона", geocode.region_boundary, self.http,
-                           place.lon, place.lat, self.s.lang)
-        if region:
-            tour.region_name, tour.region_geojson, tour.region_bbox, tour.region_osm_id = region
-        self.stage("region", 0.4)
-        self.find_settlements(tour)
+        # Nominatim, OpenStreetMap и Википедия — разные серверы: спрашиваем одновременно
+        with ThreadPoolExecutor(4) as pool:
+            for key in ("osm", "wiki", "region"):
+                self.stage(key)
+            f_region = pool.submit(self.soft, "Граница региона", geocode.region_boundary, self.http,
+                                   place.lon, place.lat, self.s.lang)
+            f_osm = pool.submit(self.soft, "OpenStreetMap", osm.surroundings, self.http, tour.bbox,
+                                place.lon, place.lat)
+            f_wiki = pool.submit(self.soft, "Статьи Википедии", wiki.nearby_pages, self.http,
+                                 tour.bbox, place.point, self.s.lang, 200)
+            region = f_region.result()
+            if region:
+                tour.region_name, tour.region_geojson, tour.region_bbox, tour.region_osm_id = region
+            f_towns = None
+            if tour.region_osm_id:
+                f_towns = pool.submit(self.soft, "Населённые пункты региона", osm.region_settlements,
+                                      self.http, tour.region_osm_id)
+            around = f_osm.result() or {}
+            self.stage("osm", 1)
+            if not tour.region_osm_id and around.get("region"):
+                tour.region_name = tour.region_name or around["region"][0]
+                tour.region_osm_id = around["region"][1]
+                f_towns = pool.submit(self.soft, "Населённые пункты региона", osm.region_settlements,
+                                      self.http, tour.region_osm_id)
+            pages = f_wiki.result()
+            self.stage("wiki", 1)
+            towns = f_towns.result() if f_towns else None
+        capital, region_towns = towns or (None, [])
+        self.compose_settlements(tour, capital, region_towns, around.get("settlements") or [])
         self.stage("region", 1)
 
         self.stage("kind")
+        if around.get("buildings") is not None:
+            tour.building_count = around["buildings"]
         tour.mode = self.detect_mode(tour)
         self.log("Тип туризма: %s" % ("городской" if tour.urban else "природный"))
         self.stage("kind", 1)
 
-        self.stage("osm")
-        pois = self.soft("Объекты OSM", osm.find_pois, self.http, tour.bbox, place.point,
-                         self.s.lang, tour.mode) or []
-        self.stage("osm", 1)
-        self.stage("wiki")
-        articles = self.soft("Статьи Википедии", wiki.nearby_articles, self.http, tour.bbox,
-                             place.point, self.s.lang, 300 if tour.urban else 100, tour.mode) or []
+        pois = osm.pois_from(around.get("elements") or [], tour.bbox, place.point, self.s.lang, tour.mode)
+        articles = wiki.articles_from(pages, tour.bbox, place.point, self.s.lang, tour.mode)
         if articles:
             tour.add_source("Википедия", "https://%s.wikipedia.org" % self.s.lang, "CC BY-SA 4.0")
         main = self.main_poi(place)
         candidates = [p for p in wiki.merge_articles(pois, articles) if not self.same_as_main(p, main)]
-        self.stage("wiki", 1)
 
         self.stage("popular")
         self.soft("Популярность", wiki.popularity, self.http, [main] + candidates, self.s.lang)
         tour.candidates = [main] + osm.rank(candidates)
         self.log("Найдено объектов рядом: %d" % len(candidates))
         self.stage("popular", 1)
-
-        if tour.urban:
-            self.stage("protected", -1)
-        else:
-            self.stage("protected")
-            tour.protected = self.soft("ООПТ", osm.protected_areas, self.http,
-                                       place.lon, place.lat) or []
-            self.stage("protected", 1)
+        tour.protected = [] if tour.urban else around.get("protected") or []
+        tour.failed_sources = [f for f in self.failed if f in ("OpenStreetMap", "Статьи Википедии")]
         self.choose(tour)
         return tour
 
-    def find_settlements(self, tour):
-        place = tour.place
-        capital, towns = None, []
-        if tour.region_osm_id:
-            found = self.soft("Населённые пункты региона", osm.region_settlements, self.http,
-                              tour.region_osm_id)
-            if found:
-                capital, towns = found
-        near = self.soft("Населённые пункты рядом", osm.near_settlements, self.http,
-                         place.lon, place.lat) or []
+    @staticmethod
+    def compose_settlements(tour, capital, towns, near):
+        """Для обзорной карты: центр, все города от 200 тыс., 10 крупнейших и посёлки рядом."""
         tour.capital = capital
         towns = sorted(towns, key=lambda t: -t.population)
         chosen = [capital] if capital else []
@@ -188,8 +196,7 @@ class Planner:
         place = tour.place
         if place.category in osm.NATURE_KEYS:
             return "nature"
-        count = self.soft("Плотность застройки", osm.building_count, self.http, place.lon, place.lat)
-        tour.building_count = count if count is not None else -1
+        count = tour.building_count if tour.building_count >= 0 else None
         if count is None:
             return "urban" if place.category in osm.URBAN_KEYS and place.city else "nature"
         if count >= URBAN_BUILDINGS or (count >= 60 and place.category in osm.URBAN_KEYS):
@@ -259,12 +266,16 @@ class Planner:
 
         self.stage("legs")
         self.build_legs(tour, elevation)
+        schedule.plan_days(tour)
+        if tour.overnight:
+            self.log("За один день не успеть (~%.0f ч с дорогой) — ищу ночлег" % tour.day_hours)
         self.stage("legs", 1)
 
         jobs = [("around", self.job_around), ("texts", self.job_texts),
                 ("weather", self.job_weather if self.s.weather else None),
                 ("photos", self.job_photos if self.s.photos else None),
-                ("nature", self.job_nature if self.s.nature and not tour.urban else None)]
+                ("nature", self.job_nature if self.s.nature and not tour.urban else None),
+                ("lodging", self.job_lodging if tour.overnight else None)]
         with ThreadPoolExecutor(len(jobs)) as pool:
             futures = []
             for key, job in jobs:
@@ -404,11 +415,7 @@ class Planner:
         t["walk_m"] = sum(leg.length_m for leg in tour.legs)
         t["offtrail_m"] = sum(leg.offtrail_m for leg in tour.legs)
         t["hours_walk"] = sum(leg.hours for leg in tour.legs)
-        if tour.urban:
-            minutes = sum(osm.VISIT_MINUTES.get(s.category, 20) for s in tour.stops[1:])
-        else:
-            minutes = (len(tour.stops) - 1) * advice.STOP_MINUTES
-        t["hours_stops"] = minutes / 60.0
+        t["hours_stops"] = sum(schedule.visit_hours(s, tour.mode) for s in tour.stops[1:])
         t["ascent"], t["descent"] = round(up), round(down)
         t["min_h"], t["max_h"] = low, high
         t["start_h"] = full_profile[0][1] if full_profile else None
@@ -488,6 +495,16 @@ class Planner:
         if tour.photos:
             tour.add_source("Wikimedia Commons", "https://commons.wikimedia.org",
                             "лицензия каждого снимка указана под ним")
+
+    def job_lodging(self, tour):
+        coords = [s.point for s in tour.stops]
+        if tour.urban:
+            point = (sum(c[0] for c in coords) / len(coords), sum(c[1] for c in coords) / len(coords))
+        else:
+            point = tour.stops[0].point      # у конца дороги — туда можно доехать
+        tour.lodging = self.soft("Ночлег", osm.lodging, self.http, point[0], point[1]) or []
+        if tour.lodging:
+            tour.add_source("Ночлег — OpenStreetMap (класс по типу и звёздам, цены уточняйте)")
 
     def job_nature(self, tour):
         tour.observations = self.soft("iNaturalist", extras.species, self.http, tour.bbox,

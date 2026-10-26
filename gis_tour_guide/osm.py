@@ -2,6 +2,8 @@
 """OpenStreetMap: Overpass (объекты, магазины, ООПТ, города, транспорт) и классификация тегов."""
 
 import re
+import time
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 
 from . import geo
 from .model import Poi, Settlement
@@ -125,20 +127,43 @@ def classify(tags, mode="nature"):
     return None
 
 
+HEDGE_AFTER = 7.0     # с — если зеркало молчит, параллельно спрашиваем следующее
+QUERY_TIMEOUT = 45    # с — ждём ответа одного зеркала не дольше
+
+
+def overpass_once(http, url, query, ttl):
+    data = http.json(url, data={"data": query}, ttl=ttl, tries=1, timeout=QUERY_TIMEOUT)
+    remark = data.get("remark") or ""
+    if ("runtime error" in remark or "timed out" in remark) and not data.get("elements"):
+        raise NetError("Overpass: " + remark)
+    return data.get("elements", [])
+
+
 def overpass(http, query, ttl=3 * 86400):
-    last = None
-    for url in OVERPASS_URLS:
-        try:
-            data = http.json(url, data={"data": query}, ttl=ttl, tries=1)
-        except NetError as error:
-            last = error
-            continue
-        remark = data.get("remark") or ""
-        if "runtime error" in remark and not data.get("elements"):
-            last = NetError("Overpass: " + remark)
-            continue
-        return data.get("elements", [])
-    raise last or NetError("Overpass недоступен")
+    """Запрос к Overpass «с подстраховкой»: первое зеркало, а если оно молчит дольше
+    HEDGE_AFTER секунд или ошиблось — следующее параллельно; берём первый успешный ответ."""
+    pool = ThreadPoolExecutor(len(OVERPASS_URLS))
+    pending, errors, urls = set(), [], list(OVERPASS_URLS)
+    try:
+        while urls or pending:
+            if urls:
+                pending.add(pool.submit(overpass_once, http, urls.pop(0), query, ttl))
+            started = time.monotonic()
+            while pending:
+                http.check()
+                done, pending = wait(pending, timeout=0.5, return_when=FIRST_COMPLETED)
+                for future in done:
+                    try:
+                        return future.result()
+                    except NetError as error:
+                        errors.append(error)
+                if done and urls:
+                    break          # ошибка — сразу следующее зеркало
+                if urls and time.monotonic() - started > HEDGE_AFTER:
+                    break          # долго молчит — подключаем следующее, не бросая это
+    finally:
+        pool.shutdown(wait=False)
+    raise errors[-1] if errors else NetError("Overpass недоступен")
 
 
 def element_point(element):
@@ -369,25 +394,22 @@ def settlement(element, role="near"):
 
 def region_settlements(http, rel_id):
     """(региональный центр, [города и посёлки региона]) по id отношения границы региона."""
-    capital = None
-    try:
-        elements = overpass(http, '[out:json][timeout:60];rel(%d);node(r:"admin_centre");out;'
-                            % rel_id, ttl=90 * 86400)
-        found = [settlement(e, "capital") for e in elements]
-        capital = next((c for c in found if c), None)
-    except NetError:
-        pass
-    towns = []
-    elements = overpass(http, '[out:json][timeout:120];area(%d)->.a;'
-                        'node(area.a)["place"~"^(city|town)$"];out;' % (3600000000 + rel_id),
-                        ttl=90 * 86400)
-    for element in elements:
+    # один запрос: id центра (out ids — без тегов) и все города и посёлки региона
+    query = ('[out:json][timeout:90];rel(%d);node(r:"admin_centre");out ids;'
+             'area(%d)->.a;node(area.a)["place"~"^(city|town)$"];out;') % (rel_id, 3600000000 + rel_id)
+    capital, centre_ids, towns = None, set(), []
+    for element in overpass(http, query, ttl=90 * 86400):
+        if "tags" not in element and "lat" not in element:
+            centre_ids.add(element.get("id"))
+            continue
         item = settlement(element, "major")
-        if item:
-            towns.append(item)
-            if capital is None and (element.get("tags") or {}).get("capital") in ("4", "3", "yes"):
-                capital = Settlement(item.name, item.lon, item.lat, item.place, item.population,
-                                     "capital")
+        if not item:
+            continue
+        towns.append(item)
+        tags = element.get("tags") or {}
+        if element.get("id") in centre_ids or (not centre_ids and capital is None
+                                                and tags.get("capital") in ("4", "3", "yes")):
+            capital = Settlement(item.name, item.lon, item.lat, item.place, item.population, "capital")
     if capital is None and towns:
         biggest = max(towns, key=lambda t: t.population)
         capital = Settlement(biggest.name, biggest.lon, biggest.lat, biggest.place,
@@ -490,3 +512,139 @@ def places_to_eat(http, lon, lat, radius_m=700, limit=6):
                       geo.dist_m((lon, lat), point) / 1000.0))
     found.sort(key=lambda item: item[2])
     return found[:limit]
+
+
+# --- Один запрос на всё окружение объекта ---
+
+def surroundings_query(bbox, lon, lat, near_km=30):
+    """Объекты для природы и города, населённые пункты рядом, ООПТ и регион, плотность застройки."""
+    parts = set()
+    for mode in ("nature", "urban"):
+        for line in poi_query(bbox, mode).split("\n"):
+            if line.startswith("nwr["):
+                parts.add(line)
+    return "\n".join([
+        "[out:json][timeout:60];",
+        "(", "\n".join(sorted(parts)), ");", "out center tags;",
+        'node["place"~"^(city|town|village)$"](around:%d,%.6f,%.6f);' % (near_km * 1000, lat, lon),
+        "out;",
+        "is_in(%.6f,%.6f)->.a;" % (lat, lon),
+        '(area.a["boundary"~"^(protected_area|national_park)$"];area.a["leisure"="nature_reserve"];'
+        'area.a["boundary"="administrative"]["admin_level"="4"];);',
+        "out tags;",
+        'way["building"](around:700,%.6f,%.6f);' % (lat, lon),
+        "out count;",
+    ])
+
+
+def surroundings(http, bbox, lon, lat):
+    """Разбор общего ответа: {elements, settlements, protected, region, buildings}."""
+    elements = overpass(http, surroundings_query(bbox, lon, lat))
+    result = {"elements": [], "settlements": [], "protected": [], "region": None, "buildings": None}
+    near = []
+    for element in elements:
+        kind = element.get("type")
+        tags = element.get("tags") or {}
+        if kind == "count":
+            result["buildings"] = int(tags.get("ways") or tags.get("total") or 0)
+        elif kind == "area":
+            if tags.get("admin_level") == "4" and tags.get("boundary") == "administrative":
+                result["region"] = (tag_name(tags), int(element["id"]) - 3600000000)
+            elif tag_name(tags):
+                title = tags.get("protection_title") or {
+                    "national_park": "национальный парк", "nature_reserve": "заповедник / заказник",
+                }.get(tags.get("boundary") or tags.get("leisure"), "особо охраняемая территория")
+                item = (tag_name(tags), title)
+                if item not in result["protected"]:
+                    result["protected"].append(item)
+        elif kind == "node" and tags.get("place") in ("city", "town", "village"):
+            item = settlement(element, "near")
+            if item:
+                km = geo.dist_m((lon, lat), item.point) / 1000.0
+                near.append((km * {"city": 0.3, "town": 0.6}.get(item.place, 1.0), item))
+        else:
+            result["elements"].append(element)
+    near.sort(key=lambda pair: pair[0])
+    result["settlements"] = [item for _, item in near[:8]]
+    return result
+
+
+def pois_from(elements, bbox, center, lang="ru", mode="nature"):
+    pois = []
+    for element in elements:
+        poi = poi_from_element(element, center, lang, mode)
+        if poi and geo.in_bbox(poi.lon, poi.lat, bbox):
+            pois.append(poi)
+    return dedupe(pois)
+
+
+# --- Ночлег ---
+
+LODGING = '["tourism"~"^(hotel|guest_house|hostel|motel|apartment|chalet|camp_site|caravan_site|alpine_hut|wilderness_hut)$"]'
+SEGMENTS = [("premium", "Дорогой / премиум"), ("middle", "Средний"), ("budget", "Бюджетный")]
+LODGING_KINDS = {"hotel": "гостиница", "guest_house": "гостевой дом", "hostel": "хостел",
+                 "motel": "мотель", "apartment": "апартаменты", "chalet": "шале / домик",
+                 "camp_site": "кемпинг", "caravan_site": "автокемпинг",
+                 "alpine_hut": "горный приют", "wilderness_hut": "избушка"}
+
+
+def stars(tags):
+    match = re.match(r"\s*(\d)", str(tags.get("stars", "")))
+    return int(match.group(1)) if match else 0
+
+
+def segment(tags):
+    """Ценовой сегмент по типу и звёздам из OSM (цен в OSM почти нет)."""
+    kind = tags.get("tourism")
+    name = (tag_name(tags) or "").lower()
+    if kind in ("hostel", "camp_site", "caravan_site", "alpine_hut", "wilderness_hut"):
+        return "budget"
+    if stars(tags) >= 4 or any(word in name for word in ("spa", "resort", "курорт", "luxury", "люкс")):
+        return "premium"
+    if stars(tags) in (1, 2) or (kind == "guest_house" and not stars(tags)):
+        return "budget"
+    return "middle"
+
+
+PRICE_ORDER = {"hotel": 0, "chalet": 1, "apartment": 2, "motel": 3, "guest_house": 4, "hostel": 5,
+               "caravan_site": 6, "camp_site": 7, "alpine_hut": 8, "wilderness_hut": 9}
+
+
+def lodging(http, lon, lat, radii_km=(5, 20, 50)):
+    """Ближайший ночлег в трёх ценовых сегментах: [{segment, label, name, kind, stars, km, ...}]."""
+    found = []
+    for radius in radii_km:
+        query = "[out:json][timeout:40];nwr%s(around:%d,%.6f,%.6f);out center tags 300;" % (
+            LODGING, radius * 1000, lat, lon)
+        found = []
+        for element in overpass(http, query):
+            tags = element.get("tags") or {}
+            point = element_point(element)
+            if not point:
+                continue
+            found.append({
+                "segment": segment(tags), "name": tag_name(tags) or LODGING_KINDS.get(tags.get("tourism"), ""),
+                "kind": LODGING_KINDS.get(tags.get("tourism"), "ночлег"), "stars": stars(tags),
+                "kind_key": tags.get("tourism", ""),
+                "km": geo.dist_m((lon, lat), point) / 1000.0, "lon": point[0], "lat": point[1],
+                "website": tags.get("website") or tags.get("contact:website", ""),
+                "phone": tags.get("phone") or tags.get("contact:phone", ""),
+                "url": "https://www.openstreetmap.org/%s/%s" % (element["type"], element["id"]),
+            })
+        if len({f["segment"] for f in found}) == 3 or (radius == radii_km[-1] and found):
+            break
+    result, used = [], set()
+    for key, label in SEGMENTS:
+        options = sorted((f for f in found if f["segment"] == key), key=lambda f: f["km"])
+        if not options:
+            # сегмента рядом нет — ближайшее по «дороговизне» из оставшегося
+            rest = [f for f in found if f["url"] not in used]
+            if not rest:
+                continue
+            price = lambda f: (-f["stars"], PRICE_ORDER.get(f["kind_key"], 5))  # noqa: E731
+            options = sorted(rest, key=price if key == "premium" else lambda f: tuple(-v for v in price(f)))
+            label += " (ближайший по классу)"
+        item = dict(options[0], label=label)
+        used.add(item["url"])
+        result.append(item)
+    return result

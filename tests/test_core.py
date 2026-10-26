@@ -171,6 +171,62 @@ class UrbanAndStartTest(unittest.TestCase):
         self.assertEqual(pois[2].popularity, 0)
 
 
+class HedgedOverpassTest(unittest.TestCase):
+
+    def test_slow_mirror_does_not_block(self):
+        import threading
+        import time
+
+        class Slow:
+            def __init__(self):
+                self.release = threading.Event()
+
+            def check(self):
+                pass
+
+            def json(self, url, **_kwargs):
+                if url == osm.OVERPASS_URLS[0]:
+                    self.release.wait(10)          # первое зеркало «висит»
+                    return {"elements": [{"id": "slow"}]}
+                return {"elements": [{"id": "fast"}]}
+
+        http = Slow()
+        old = osm.HEDGE_AFTER
+        osm.HEDGE_AFTER = 0.3
+        try:
+            started = time.monotonic()
+            self.assertEqual(osm.overpass(http, "q"), [{"id": "fast"}])
+            self.assertLess(time.monotonic() - started, 3)
+        finally:
+            osm.HEDGE_AFTER = old
+            http.release.set()
+
+    def test_error_moves_to_next_mirror_at_once(self):
+        class Failing:
+            calls = []
+
+            def check(self):
+                pass
+
+            def json(self, url, **_kwargs):
+                self.calls.append(url)
+                if url != osm.OVERPASS_URLS[-1]:
+                    raise net.NetError("HTTP 504")
+                return {"elements": [1]}
+
+        self.assertEqual(osm.overpass(Failing(), "q"), [1])
+        self.assertEqual(Failing.calls, osm.OVERPASS_URLS)
+
+    def test_lodging_segments(self):
+        self.assertEqual(osm.segment({"tourism": "hotel", "stars": "5"}), "premium")
+        self.assertEqual(osm.segment({"tourism": "hotel", "name": "Spa Resort"}), "premium")
+        self.assertEqual(osm.segment({"tourism": "hotel", "stars": "3"}), "middle")
+        self.assertEqual(osm.segment({"tourism": "hotel"}), "middle")
+        self.assertEqual(osm.segment({"tourism": "hostel"}), "budget")
+        self.assertEqual(osm.segment({"tourism": "guest_house"}), "budget")
+        self.assertEqual(osm.segment({"tourism": "wilderness_hut"}), "budget")
+
+
 class RoutingTest(unittest.TestCase):
 
     def test_road_summary_merges_and_drops_ramps(self):

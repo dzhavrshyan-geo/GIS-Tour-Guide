@@ -7,7 +7,6 @@ import math
 from . import extras, geo
 from .text import fmt_hours, fmt_km, fmt_num
 
-STOP_MINUTES = 25          # осмотр одного объекта
 SHOP_FAR_KM = 15           # дальше — «магазинов рядом нет»
 COLD_COUNTRIES_TICKS = ("ru", "by", "kz", "ua", "fi", "ee", "lv", "lt", "se", "no", "pl")
 BEAR_REGIONS = ("камчат", "магадан", "чукот", "сахалин", "хабаров", "приморск", "якут",
@@ -88,13 +87,15 @@ def build(tour):
     daylight = geo.daylight_hours(tour.place.lat, date.timetuple().tm_yday)
     need = hours_total + 2 * drive_h
     plan.append("Светлое время %s: ~%s." % (date.strftime("%d.%m"), fmt_hours(daylight)))
-    if hours_total > 9:
-        plan.append("Пешком больше 9 часов — лучше разбить на 2 дня с ночёвкой.")
-        camps = [s.name for s in tour.candidates if s.category in ("camp", "hut")][:3]
-        if camps:
-            plan.append("Места для ночёвки рядом: " + ", ".join(camps) + ".")
-        gear.append("Палатка, спальник (комфорт ≤ %d °C), коврик, горелка с газом." % (
-            round(tmin) - 3))
+    if tour.overnight:
+        plan += overnight_lines(tour)
+        roofed = [l for l in tour.lodging if l["kind_key"] not in ("camp_site", "caravan_site", "wilderness_hut")]
+        if not roofed:
+            camps = [s.name for s in tour.candidates if s.category in ("camp", "hut")][:3]
+            if camps:
+                plan.append("Места для ночёвки рядом: " + ", ".join(camps) + ".")
+            gear.append("Палатка, спальник (комфорт ≤ %d °C), коврик, горелка с газом." % (
+                round(tmin) - 3))
     elif need > daylight - 1:
         plan.append("Дорога и маршрут занимают почти весь световой день — выезжайте "
                     "затемно или заночуйте поблизости.")
@@ -130,7 +131,7 @@ def build(tour):
 
     # --- Снаряжение ---
     gear += ["Рюкзак 25–35 л, аптечка (пластыри от мозолей, бинт, обезболивающее, антигистаминное).",
-             "Заряженный телефон с офлайн-картой и треком (GPX в папке экскурсии), пауэрбанк.",
+             "Заряженный телефон с офлайн-картой и треком GPX (кнопка «Скачать GPX…» в окне плагина), пауэрбанк.",
              "Налобный фонарик, свисток, нож, спички/зажигалка, спасательное одеяло."]
     if (t.get("ascent") or 0) > 400 or offtrail > 1000:
         gear.append("Треккинговые палки — на спусках по осыпям и шлаку берегут колени.")
@@ -252,8 +253,8 @@ def build_urban(tour):
         plan.append("Начало прогулки — %s «%s» (%s от объекта)." % (kind.lower(), name, fmt_km(km * 1000)))
     plan.append("Пешком: %s, в пути ~%s, с осмотром ~%s." % (
         fmt_km(t.get("walk_m", 0)), fmt_hours(hours_walk), fmt_hours(hours_total)))
-    if hours_total > 7:
-        plan.append("Программа больше чем на день — отметьте меньше объектов или разбейте на два дня.")
+    if tour.overnight:
+        plan += overnight_lines(tour)
     museums = [s for s in stops if s.category in ("museum", "gallery", "zoo")]
     if museums and date.weekday() == 0:
         plan.append("Поездка в понедельник — многие музеи в этот день закрыты, проверьте расписание.")
@@ -310,3 +311,24 @@ def build_urban(tour):
     tour.advice = [(title, items) for title, items in sections if items]
     tour.warnings = []
     return tour.advice
+
+
+def overnight_lines(tour):
+    """«Можно не успеть за день», разбивка по дням и три варианта ночлега."""
+    lines = ["Вы можете не успеть посмотреть всё за один день: с дорогой выходит ~%s, "
+             "а светлого времени ~%s. Советуем заложить %d %s и ночлег поблизости." % (
+                 fmt_hours(tour.day_hours), fmt_hours(tour.daylight), max(2, len(tour.days)),
+                 "дня" if max(2, len(tour.days)) < 5 else "дней")]
+    for day in tour.days:
+        if day["stops"]:
+            lines.append("День %d: точки %s — %s, ~%s." % (
+                day["number"], ", ".join(str(n) for n in day["stops"]), fmt_km(day["km"] * 1000),
+                fmt_hours(day["hours"])))
+    for item in tour.lodging:
+        lines.append("Ночлег — %s: %s (%s%s), %s." % (
+            item["label"].lower(), item["name"], item["kind"],
+            ", %d★" % item["stars"] if item["stars"] else "", fmt_km(item["km"] * 1000)))
+    if tour.overnight and not tour.lodging:
+        lines.append("Гостиниц и приютов рядом в OpenStreetMap не нашлось — поищите ночлег "
+                     "в ближайшем городе или возьмите палатку.")
+    return lines

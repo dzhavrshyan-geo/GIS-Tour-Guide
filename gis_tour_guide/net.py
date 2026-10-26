@@ -8,6 +8,7 @@
 import hashlib
 import json
 import os
+import socket
 import threading
 import time
 import urllib.error
@@ -109,7 +110,7 @@ class Http:
             time.sleep(min(delay, 0.2))
             delay -= 0.2
 
-    def get(self, url, params=None, data=None, ttl=7 * 86400, headers=None, tries=2):
+    def get(self, url, params=None, data=None, ttl=7 * 86400, headers=None, tries=2, timeout=None):
         """Байты ответа. data (dict или bytes) — POST. ttl — срок кэша, с (0 — без кэша)."""
         self.check()
         url = self.build_url(url, params)
@@ -125,16 +126,22 @@ class Http:
         all_headers.update(headers or {})
         last_error = None
         for attempt in range(tries):
-            for transport in self.transports:
+            for transport in list(self.transports):
                 self.wait_turn(url)
                 try:
-                    status, body = transport(url, data, all_headers, self.timeout)
+                    status, body = transport(url, data, all_headers, timeout or self.timeout)
                 except NetError as error:
                     last_error = error
                     continue
-                except Exception as error:  # сеть, SSL, прокси — пробуем другой способ
+                except Exception as error:  # SSL, прокси — пробуем другой способ; тайм-аут — нет
                     last_error = NetError("%s: %s" % (type(error).__name__, error))
+                    if is_timeout(error):
+                        break
                     continue
+                if transport is not self.transports[0]:
+                    # этот способ работает (например, SSL через QGIS) — дальше начинаем с него
+                    self.transports.remove(transport)
+                    self.transports.insert(0, transport)
                 if status == 200:
                     if path:
                         os.makedirs(os.path.dirname(path), exist_ok=True)
@@ -146,12 +153,18 @@ class Http:
                     raise last_error
                 break  # 429/5xx — подождать и повторить
             self.check()
-            time.sleep(1.5 * (attempt + 1))
+            if attempt + 1 < tries:
+                time.sleep(1.5 * (attempt + 1))
         raise last_error or NetError(url)
 
-    def json(self, url, params=None, data=None, ttl=7 * 86400, headers=None, tries=2):
-        body = self.get(url, params, data, ttl, headers, tries)
+    def json(self, url, params=None, data=None, ttl=7 * 86400, headers=None, tries=2, timeout=None):
+        body = self.get(url, params, data, ttl, headers, tries, timeout)
         try:
             return json.loads(body.decode("utf-8"))
         except ValueError as error:
             raise NetError("Не JSON от %s: %s" % (url[:80], error))
+
+
+def is_timeout(error):
+    reason = getattr(error, "reason", error)
+    return isinstance(reason, (socket.timeout, TimeoutError)) or "timed out" in str(error).lower()

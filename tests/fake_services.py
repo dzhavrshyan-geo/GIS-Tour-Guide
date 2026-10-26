@@ -148,6 +148,31 @@ def parse_coords(url):
     return [tuple(float(v) for v in pair.split(",")) for pair in part.split(";")]
 
 
+NEAR_VILLAGES = [
+    {"type": "node", "id": 54, "lat": 52.83, "lon": 158.18, "tags": {"place": "village", "name": "Термальный"}},
+    {"type": "node", "id": 55, "lat": 52.91, "lon": 158.22, "tags": {"place": "village", "name": "Паратунка"}},
+]
+REGION_TOWNS = [
+    {"type": "node", "id": 50, "lat": TOWN[1], "lon": TOWN[0], "tags": {
+        "place": "city", "name": "Петропавловск-Камчатский", "population": "164900"}},
+    {"type": "node", "id": 51, "lat": 53.19, "lon": 158.38, "tags": {
+        "place": "town", "name": "Елизово", "population": "38000"}},
+    {"type": "node", "id": 52, "lat": 52.93, "lon": 158.40, "tags": {
+        "place": "town", "name": "Вилючинск", "population": "21000"}},
+    {"type": "node", "id": 53, "lat": 56.32, "lon": 160.84, "tags": {
+        "place": "town", "name": "Ключи", "population": "4500"}},
+]
+NATURE_LODGING = [
+    {"type": "node", "id": 701, "lat": 52.92, "lon": 158.21, "tags": {
+        "tourism": "hotel", "name": "Паратунка Резорт", "stars": "4", "website": "https://resort.example"}},
+    {"type": "node", "id": 702, "lat": 52.60, "lon": 158.09, "tags": {
+        "tourism": "guest_house", "name": "Гостевой дом у ключей", "phone": "+7 900 000-00-00"}},
+    {"type": "node", "id": 703, "lat": 52.586, "lon": 158.077, "tags": {
+        "tourism": "camp_site", "name": "Стоянка у Горелого"}},
+    {"type": "node", "id": 704, "lat": 52.83, "lon": 158.18, "tags": {
+        "tourism": "hotel", "name": "Гостиница Термальная", "stars": "3"}},
+]
+
 # --- Город: Московский Кремль ---
 
 KREMLIN = (37.6175, 55.7520)
@@ -193,6 +218,22 @@ WIKIDATA_TITLES = {"Q12": "Государственный исторически
                    "Q14": "Большой театр", "Q15": "Царь-пушка", "Q10": "Красная площадь"}
 
 
+MOSCOW_TOWNS = [
+    {"type": "node", "id": 1, "lat": 55.7558, "lon": 37.6173, "tags": {
+        "place": "city", "name": "Москва", "population": "13010112", "capital": "yes"}},
+    {"type": "node", "id": 2, "lat": 55.9825, "lon": 37.1814, "tags": {
+        "place": "city", "name": "Зеленоград", "population": "250000"}},
+]
+URBAN_LODGING = [
+    {"type": "node", "id": 801, "lat": 55.7586, "lon": 37.6216, "tags": {
+        "tourism": "hotel", "name": "Метрополь", "stars": "5"}},
+    {"type": "node", "id": 802, "lat": 55.7570, "lon": 37.6300, "tags": {
+        "tourism": "hotel", "name": "Отель в центре", "stars": "3"}},
+    {"type": "node", "id": 803, "lat": 55.7590, "lon": 37.6250, "tags": {
+        "tourism": "hostel", "name": "Хостел на Никольской"}},
+]
+
+
 def fake_jpeg(seed):
     from qgis.PyQt.QtGui import QColor, QImage
     from gis_tour_guide.report import image_bytes
@@ -215,7 +256,7 @@ class FakeHttp:
     def check(self):
         pass
 
-    def get(self, url, params=None, data=None, ttl=0, headers=None, tries=2):
+    def get(self, url, params=None, data=None, ttl=0, headers=None, tries=2, timeout=None):
         full = url + ("?" + urllib.parse.urlencode(params) if params else "")
         self.calls.append(full)
         host = urllib.parse.urlsplit(url).hostname
@@ -228,7 +269,7 @@ class FakeHttp:
             return fake_jpeg(len(url))
         return json.dumps(self.answer(url, params or {}, data)).encode("utf-8")
 
-    def json(self, url, params=None, data=None, ttl=0, headers=None, tries=2):
+    def json(self, url, params=None, data=None, ttl=0, headers=None, tries=2, timeout=None):
         return json.loads(self.get(url, params, data, ttl, headers, tries).decode("utf-8"))
 
     def answer(self, url, params, data):
@@ -260,6 +301,17 @@ class FakeHttp:
         if host in ("overpass-api.de", "maps.mail.ru", "overpass.kumi.systems"):
             query = data["data"] if isinstance(data, dict) else \
                 urllib.parse.parse_qs(data.decode())["data"][0]
+            if "is_in" in query and "out center tags" in query:
+                # общий запрос: объекты + посёлки рядом + ООПТ и регион + застройка
+                return {"elements": OVERPASS_POIS["elements"] + NEAR_VILLAGES + [
+                    {"type": "area", "id": 1, "tags": {
+                        "boundary": "protected_area", "name": "Южно-Камчатский природный парк",
+                        "protection_title": "природный парк"}},
+                    {"type": "area", "id": 3600151233, "tags": {
+                        "boundary": "administrative", "admin_level": "4", "name": "Камчатский край"}},
+                    {"type": "count", "id": 0, "tags": {"ways": "0", "total": "0"}}]}
+            if '"tourism"~"^(hotel' in query:
+                return {"elements": NATURE_LODGING}
             if "is_in" in query:
                 return {"elements": [{"type": "area", "id": 1, "tags": {
                     "boundary": "protected_area", "name": "Южно-Камчатский природный парк",
@@ -267,8 +319,7 @@ class FakeHttp:
             if "out count" in query:
                 return {"elements": [{"type": "count", "id": 0, "tags": {"ways": "0", "total": "0"}}]}
             if "admin_centre" in query:
-                return {"elements": [{"type": "node", "id": 50, "lat": TOWN[1], "lon": TOWN[0], "tags": {
-                    "place": "city", "name": "Петропавловск-Камчатский", "population": "164 900"}}]}
+                return {"elements": [{"type": "node", "id": 50}] + REGION_TOWNS}
             if "area(" in query:
                 return {"elements": [
                     {"type": "node", "id": 50, "lat": TOWN[1], "lon": TOWN[0], "tags": {
@@ -281,11 +332,7 @@ class FakeHttp:
                     {"type": "node", "id": 53, "lat": 56.32, "lon": 160.84, "tags": {
                         "place": "town", "name": "Ключи", "population": "4500"}}]}
             if '"place"~"^(city|town|village)$"' in query:
-                return {"elements": [
-                    {"type": "node", "id": 54, "lat": 52.83, "lon": 158.18, "tags": {
-                        "place": "village", "name": "Термальный"}},
-                    {"type": "node", "id": 55, "lat": 52.91, "lon": 158.22, "tags": {
-                        "place": "village", "name": "Паратунка"}}]}
+                return {"elements": NEAR_VILLAGES}
             if '"place"~' in query:
                 return {"elements": [{"type": "node", "id": 50, "lat": TOWN[1], "lon": TOWN[0],
                                       "tags": {"place": "city", "name": "Петропавловск-Камчатский"}}]}
@@ -400,11 +447,17 @@ class FakeHttp:
         if host in ("overpass-api.de", "maps.mail.ru", "overpass.kumi.systems"):
             query = data["data"] if isinstance(data, dict) else \
                 urllib.parse.parse_qs(data.decode())["data"][0]
+            if "is_in" in query and "out center tags" in query:
+                return {"elements": URBAN_POIS["elements"] + [
+                    {"type": "area", "id": 3600102269, "tags": {
+                        "boundary": "administrative", "admin_level": "4", "name": "Москва"}},
+                    {"type": "count", "id": 0, "tags": {"ways": "2400"}}]}
+            if '"tourism"~"^(hotel' in query:
+                return {"elements": URBAN_LODGING}
             if "out count" in query:
                 return {"elements": [{"type": "count", "id": 0, "tags": {"ways": "2400"}}]}
             if "admin_centre" in query:
-                return {"elements": [{"type": "node", "id": 1, "lat": 55.7558, "lon": 37.6173, "tags": {
-                    "place": "city", "name": "Москва", "population": "13010112"}}]}
+                return {"elements": [{"type": "node", "id": 1}] + MOSCOW_TOWNS}
             if "area(" in query:
                 return {"elements": [
                     {"type": "node", "id": 1, "lat": 55.7558, "lon": 37.6173, "tags": {

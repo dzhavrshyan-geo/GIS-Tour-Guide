@@ -10,7 +10,7 @@ import os
 import re
 from concurrent.futures import ThreadPoolExecutor
 
-from . import brand, extras
+from . import brand, extras, webmap
 from .net import Cancelled, NetError
 from .text import clip, esc, fmt_hours, fmt_km, fmt_num, plural
 
@@ -45,7 +45,7 @@ text-align:center;font-weight:bold;line-height:26px;margin-right:6px}
 .gallery td{vertical-align:top;width:33%%;padding:6px}
 .gallery img{width:100%%;border-radius:8px}
 .quote{border-left:4px solid %(sand)s;background:#fff;padding:6px 12px;margin:8px 0;border-radius:4px}
-a{color:%(green)s}
+a{color:%(green)s;overflow-wrap:anywhere}
 .foot{margin-top:30px;padding:12px 16px;background:%(sand_soft)s;border-radius:10px;color:%(muted)s;font-size:13px}
 """ % {"ink": brand.INK, "paper": brand.PAPER, "green": brand.GREEN, "sand": brand.SAND,
        "green_soft": brand.GREEN_SOFT, "green_dark": brand.GREEN_DARK, "line": brand.LINE,
@@ -62,7 +62,7 @@ h3{color:%(green_dark)s;font-size:11.5pt;margin-top:10px;margin-bottom:3px}
 th{background-color:%(green)s;color:white;text-align:left}
 .num{color:white;font-weight:bold}
 .quote{color:%(ink)s}
-a{color:%(green)s}
+a{color:%(green)s;overflow-wrap:anywhere}
 """ % {"ink": brand.INK, "green": brand.GREEN, "green_dark": brand.GREEN_DARK, "sand": brand.SAND,
        "muted": brand.MUTED}
 
@@ -175,6 +175,9 @@ def write_gpx(tour, path):
         lines.append('<wpt lat="%.6f" lon="%.6f">%s<name>%s</name><desc>%s</desc></wpt>' % (
             poi.lat, poi.lon, "<ele>%.0f</ele>" % poi.elevation if poi.elevation is not None else "",
             esc("%d. %s" % (poi.order, poi.name) if poi.order else poi.name), esc(poi.kind)))
+    for item in tour.lodging:
+        lines.append('<wpt lat="%.6f" lon="%.6f"><name>%s</name><desc>%s</desc></wpt>' % (
+            item["lat"], item["lon"], esc("Ночлег: " + item["name"]), esc(item["label"])))
     lines.append("<trk><name>%s</name>" % esc("Пеший маршрут: " + tour.place.name))
     for leg in tour.legs:
         for segment in leg.segments:
@@ -285,11 +288,20 @@ def draw_profile(tour, width=900, height=230):
 
 class Builder:
 
-    def __init__(self, tour, images, pdf=False):
+    def __init__(self, tour, images, pdf=False, basemap=None):
         self.tour = tour
         self.images = images
         self.pdf = pdf
+        self.basemap = basemap        # None — без интерактивных карт
         self.out = []
+
+    def map(self, key, title, sheet):
+        """Карта: в HTML — интерактивная (лист для печати раскрывается), в PDF — фирменный лист."""
+        if self.pdf or self.basemap is None:
+            return self.figure("map:" + key)
+        printed = self.images.src("map:" + key) if self.images.has("map:" + key) else ""
+        base = self.basemap if key != "overview" else (self.basemap if self.basemap in webmap.TILES else "light")
+        return webmap.block(key, self.tour, base, title, sheet, printed) or self.figure("map:" + key)
 
     def add(self, *parts):
         self.out.extend(parts)
@@ -425,7 +437,7 @@ def first_photo_key(poi):
 def how_to_get(b):
     tour = b.tour
     b.h2("Как добраться")
-    b.add(b.figure("map:overview"))
+    b.add(b.map("overview", "%s — как добраться" % tour.place.name, "обзорная карта"))
     drive = tour.drive
     if tour.start_reason and drive and drive.start_name:
         b.add("<p class='small'>Откуда едем: %s (%s).</p>" % (esc(drive.start_name), esc(tour.start_reason)))
@@ -467,7 +479,7 @@ def route(b):
     tour = b.tour
     t = tour.totals
     b.h2("Маршрут прогулки" if tour.urban else "Маршрут экскурсии")
-    b.add(b.figure("map:scheme"))
+    b.add(b.map("scheme", "%s — маршрут" % tour.place.name, "карта-схема маршрута"))
     objects = len(tour.stops) - 1
     tiles = [(fmt_km(t.get("walk_m", 0)), "кольцевой" if tour.loop else "в одну сторону"),
              (fmt_hours(t.get("hours_walk", 0)), "в пути пешком"),
@@ -564,7 +576,7 @@ def photos_section(b):
     b.h2("Фотографии")
     b.add("<p class='small'>Номера совпадают с картой-схемой фотографий: каждый снимок стоит там, "
           "где его сделали.</p>")
-    b.add(b.figure("map:photos"))
+    b.add(b.map("photos", "Где сделаны фотографии", "карта-схема фотографий"))
     rows = []
     for i in range(0, len(photos), 3):
         cells = []
@@ -573,8 +585,10 @@ def photos_section(b):
                 b.num(photo.number, "photo"), esc(photo.poi_name),
                 esc(clip(photo.description, 160)), "" if not photo.date else " (%s)" % esc(photo.date),
                 esc(photo.author or "автор не указан"), esc(photo.license), b.link(photo.page_url, "Викисклад"))
-            cells.append("<td valign='top' width='33%%'>%s<br>%s</td>" % (
-                b.img("photo:%d" % photo.number, 215), caption))
+            anchor = "" if b.pdf else " id='card-%d'" % photo.number
+            cells.append("<td valign='top' width='33%%'%s>%s<br>%s</td>" % (
+                anchor, b.img("photo:%d" % photo.number, 215, extra="" if b.pdf else " id='photo-%d'" % photo.number),
+                caption))
         cells += ["<td></td>"] * (3 - len(cells))
         rows.append("<tr>%s</tr>" % "".join(cells))
     b.add("<table class='gallery' width='100%%' cellpadding='4'>%s</table>" % "".join(rows))
@@ -624,20 +638,60 @@ def sources(b):
         b.add("<div class='foot'>%s</div>" % esc(note))
 
 
-NATURE_PARTS = [about, how_to_get, route, stops_section, advice_section, photos_section,
+def days_section(b):
+    """«Не успеть за день»: план по дням и три варианта ночлега."""
+    tour = b.tour
+    if not tour.overnight:
+        return
+    b.h2("Ночлег и план по дням")
+    b.add(b.warn("Вы можете не успеть посмотреть всё за один день: с дорогой выходит ~%s, а светлого "
+                 "времени ~%s. Советуем остановиться на ночь поблизости." % (
+                     fmt_hours(tour.day_hours), fmt_hours(tour.daylight))))
+    rows = []
+    for day in tour.days:
+        names = ", ".join("%d. %s" % (n, tour.stops[n].name) for n in day["stops"] if n < len(tour.stops))
+        rows.append(["День %d" % day["number"], esc(names or "возвращение"), fmt_km(day["km"] * 1000),
+                     fmt_hours(day["hours"])])
+    b.add("<h3>План по дням</h3>" + b.grid(["День", "Точки", "Пешком", "Время с осмотром"], rows))
+    if tour.lodging:
+        rows = []
+        for item in tour.lodging:
+            contacts = []
+            if item.get("website"):
+                contacts.append(b.link(item["website"], "сайт"))
+            if item.get("phone"):
+                contacts.append(esc(item["phone"]))
+            contacts.append(b.link(item["url"], "на карте"))
+            rows.append([esc(item["label"]), "<b>%s</b>" % esc(item["name"]),
+                         esc(item["kind"]) + (" · %d★" % item["stars"] if item["stars"] else ""),
+                         fmt_km(item["km"] * 1000), " · ".join(contacts)])
+        b.add("<h3>Где переночевать — ближайшие варианты</h3>" + b.grid(
+            ["Сегмент", "Название", "Тип", "От маршрута", "Контакты"], rows))
+        b.add("<p class='small'>Класс жилья определён по типу и звёздам из OpenStreetMap — "
+              "цены и свободные места уточняйте у владельцев.</p>")
+    else:
+        b.add("<p>Гостиниц и приютов рядом в OpenStreetMap не нашлось — поищите ночлег в "
+              "ближайшем городе или возьмите палатку.</p>")
+
+
+NATURE_PARTS = [about, how_to_get, route, days_section, stops_section, advice_section, photos_section,
                 nature_section, voyage_more, sources]
-URBAN_PARTS = [about, how_to_get, route, stops_section, advice_section, photos_section,
+URBAN_PARTS = [about, how_to_get, route, days_section, stops_section, advice_section, photos_section,
                voyage_more, sources]
 
 
-def build_html(tour, images, pdf=False):
-    """Отчёт целиком. Структура зависит от типа туризма (природа / город)."""
-    b = Builder(tour, images, pdf)
+def build_html(tour, images, pdf=False, basemap="light"):
+    """Отчёт целиком. Структура зависит от типа туризма (природа / город).
+
+    basemap — подложка интерактивных карт HTML (None — только статичные листы).
+    """
+    b = Builder(tour, images, pdf, None if pdf else basemap)
     css = PDF_CSS if pdf else WEB_CSS
     b.add("<!DOCTYPE html><html lang='ru'><head><meta charset='utf-8'>",
           "<meta name='viewport' content='width=device-width,initial-scale=1'>",
-          "<title>%s</title><style>%s</style></head><body>" % (
-              esc("%s — %s" % (tour.place.name, brand.NAME)), css))
+          "<title>%s</title><style>%s</style>%s</head><body>" % (
+              esc("%s — %s" % (tour.place.name, brand.NAME)), css,
+              webmap.assets() if b.basemap is not None else ""))
     header(b)
     for part in URBAN_PARTS if tour.urban else NATURE_PARTS:
         part(b)
