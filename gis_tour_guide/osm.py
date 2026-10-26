@@ -767,3 +767,60 @@ def access_issues(http, drive_coords, trailhead, month):
         if note and note not in notes:
             notes.append(note)
     return notes
+
+
+# --- Вода и болота для пути по рельефу ---
+
+WATER_QUERY = """[out:json][timeout:60];
+(
+ way["natural"="water"]{box};
+ relation["natural"="water"]{box};
+ way["waterway"="riverbank"]{box};
+ way["natural"="wetland"]{box};
+ relation["natural"="wetland"]{box};
+ way["natural"="glacier"]{box};
+ way["waterway"~"^(river|canal)$"]{box};
+);
+out geom;"""
+
+
+def ring(geometry, limit=400):
+    coords = [(p["lon"], p["lat"]) for p in geometry or [] if "lon" in p]
+    if len(coords) > limit:                       # для растеризации хватит и прореженного контура
+        step = len(coords) // limit + 1
+        coords = coords[::step] + [coords[-1]]
+    return coords
+
+
+def water_kind(tags):
+    if tags.get("natural") == "wetland":
+        return "wetland"
+    if tags.get("natural") == "glacier":
+        return "glacier"
+    if tags.get("waterway") in ("river", "canal"):
+        return "river"
+    return "water"
+
+
+def water_features(http, bbox):
+    """{"polygons": [(вид, контур)], "lines": [(вид, линия)]} — озёра, болота, ледники, реки."""
+    polygons, lines = [], []
+    for element in overpass(http, WATER_QUERY.replace("{box}", bbox_filter(bbox)), ttl=30 * 86400):
+        tags = element.get("tags") or {}
+        kind = water_kind(tags)
+        if element.get("type") == "way":
+            coords = ring(element.get("geometry"))
+            if len(coords) < 2:
+                continue
+            closed = coords[0] == coords[-1] and len(coords) > 3
+            if kind == "river" and not closed:
+                lines.append((kind, coords))
+            elif closed:
+                polygons.append((kind, coords))
+        elif element.get("type") == "relation":
+            for member in element.get("members") or []:
+                if member.get("role") == "outer":
+                    coords = ring(member.get("geometry"))
+                    if len(coords) > 3 and coords[0] == coords[-1]:
+                        polygons.append((kind, coords))
+    return {"polygons": polygons, "lines": lines}

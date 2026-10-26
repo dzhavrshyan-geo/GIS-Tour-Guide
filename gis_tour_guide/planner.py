@@ -393,7 +393,14 @@ class Planner:
         return matrix
 
     def build_legs(self, tour, elevation):
-        finder = terrain.offtrail_finder(elevation)
+        water = None
+        if elevation is not None:
+            points = [s.point for s in tour.stops]
+            water = self.soft("Озёра и болота", osm.water_features, self.http, geo.bbox_of(points, 2500))
+            if water and (water["polygons"] or water["lines"]):
+                self.log("Вода и болота для пути по рельефу: %d контуров, %d рек" % (
+                    len(water["polygons"]), len(water["lines"])))
+        finder = terrain.offtrail_finder(elevation, water=water)
         pairs = list(zip(range(len(tour.stops)), range(1, len(tour.stops))))
         if tour.loop and len(tour.stops) > 1:
             pairs.append((len(tour.stops) - 1, 0))

@@ -159,6 +159,16 @@ class NatureTest(unittest.TestCase):
         self.assertGreater(t["max_h"], 1500)
         self.assertTrue(all(p.elevation is not None for p in tour.stops))
 
+    def test_offtrail_path_avoids_lake(self):
+        import numpy as np
+        from fake_services import LAKE
+        from gis_tour_guide import geo, terrain
+        segments = [s for leg in self.tour.legs for s in leg.segments if s.kind == "offtrail"]
+        self.assertTrue(segments)
+        dense = [c for s in segments for c in geo.densify(s.coords, 20)]
+        inside = terrain.inside(np.array([p[0] for p in dense]), np.array([p[1] for p in dense]), LAKE)
+        self.assertFalse(inside.any())
+
     def test_photos_numbered_in_route_order(self):
         tour = self.tour
         self.assertEqual([p.number for p in tour.photos], list(range(1, len(tour.photos) + 1)))

@@ -148,6 +148,14 @@ def parse_coords(url):
     return [tuple(float(v) for v in pair.split(",")) for pair in part.split(";")]
 
 
+# Озерцо прямо между пещерой и тропой — путь по рельефу должен его обойти
+LAKE_CENTER = (158.0140, 52.5480)
+LAKE = [(LAKE_CENTER[0] + 0.0016 * math.cos(a / 8.0 * math.pi), LAKE_CENTER[1] + 0.0010 * math.sin(a / 8.0 * math.pi))
+        for a in range(17)]
+LAKE[-1] = LAKE[0]
+WATER = [{"type": "way", "id": 990, "tags": {"natural": "water", "name": "Озерцо"},
+          "geometry": [{"lon": x, "lat": y} for x, y in LAKE]}]
+
 NEAR_VILLAGES = [
     {"type": "node", "id": 54, "lat": 52.83, "lon": 158.18, "tags": {"place": "village", "name": "Термальный"}},
     {"type": "node", "id": 55, "lat": 52.91, "lon": 158.22, "tags": {"place": "village", "name": "Паратунка"}},
@@ -312,6 +320,8 @@ class FakeHttp:
                     {"type": "count", "id": 0, "tags": {"ways": "0", "total": "0"}}]}
             if '"tourism"~"^(hotel' in query:
                 return {"elements": NATURE_LODGING}
+            if "out geom" in query:
+                return {"elements": WATER}
             if "mountain_pass" in query:
                 return {"elements": [
                     {"type": "node", "id": 901, "lat": 52.70, "lon": 158.20,

@@ -199,8 +199,54 @@ def steep_penalty(degrees):
     return 1.0 + ((degrees - 20.0) / 8.0) ** 2
 
 
-def least_cost_path(grid, start, end, max_slope_deg=35.0, max_nodes=400000):
-    """Самый быстрый для пешехода путь по сетке (A*). (точки (lon, lat), часы) или None."""
+# Во сколько раз тяжелее идти по клетке: озеро — нельзя, болото, ледник, река (брод)
+WATER_COST = {"water": float("inf"), "wetland": 4.0, "glacier": 3.0, "river": 25.0}
+
+
+def inside(lons, lats, polygon):
+    """Какие точки (массивы lon/lat) внутри контура — луч по горизонтали, векторно."""
+    result = np.zeros(lons.shape, dtype=bool)
+    xs = np.array([p[0] for p in polygon])
+    ys = np.array([p[1] for p in polygon])
+    x0, y0, x1, y1 = xs[:-1], ys[:-1], xs[1:], ys[1:]
+    for ax, ay, bx, by in zip(x0, y0, x1, y1):
+        if ay == by:
+            continue
+        crosses = ((ay > lats) != (by > lats)) & (lons < (bx - ax) * (lats - ay) / (by - ay) + ax)
+        result ^= crosses
+    return result
+
+
+def water_mask(grid, features):
+    """Множители стоимости шага по клеткам сетки (1 — обычная местность)."""
+    mask = np.ones((grid.rows, grid.cols), dtype=float)
+    if not features:
+        return mask
+    west, south, east, north = grid.bbox
+    cols = grid.west + (np.arange(grid.cols) + 0.5) * grid.step_lon
+    rows = grid.north - (np.arange(grid.rows) + 0.5) * grid.step_lat
+    lons, lats = np.meshgrid(cols, rows)
+    for kind, polygon in features.get("polygons", []):
+        px = [p[0] for p in polygon]
+        py = [p[1] for p in polygon]
+        if max(px) < west or min(px) > east or max(py) < south or min(py) > north:
+            continue
+        hit = inside(lons, lats, polygon)
+        mask[hit] = np.maximum(mask[hit], WATER_COST.get(kind, 1.0))
+    step = min(grid.dx_m, grid.dy_m) / 2.0
+    for kind, line in features.get("lines", []):
+        for lon, lat in geo.densify(line, step):
+            if west <= lon <= east and south <= lat <= north:
+                r, c = grid.cell(lon, lat)
+                mask[r, c] = max(mask[r, c], WATER_COST.get(kind, 1.0))
+    return mask
+
+
+def least_cost_path(grid, start, end, max_slope_deg=35.0, max_nodes=400000, mask=None):
+    """Самый быстрый для пешехода путь по сетке (A*). (точки (lon, lat), часы) или None.
+
+    mask — множители стоимости клеток (вода, болота); inf — непроходимо.
+    """
     rows, cols = grid.rows, grid.cols
     heights = grid.values.astype(float).ravel().tolist()
     dx, dy = grid.dx_m, grid.dy_m
@@ -213,6 +259,11 @@ def least_cost_path(grid, start, end, max_slope_deg=35.0, max_nodes=400000):
     r0, c0 = grid.cell(*start)
     r1, c1 = grid.cell(*end)
     goal = r1 * cols + c1
+    factors = None
+    if mask is not None:
+        mask = mask.copy()
+        mask[r0, c0] = mask[r1, c1] = 1.0      # стоим на берегу — сами клетки старта и финиша проходимы
+        factors = mask.ravel().tolist()
     best_speed = 6.0 * OFFTRAIL_SPEED
 
     def heuristic(r, c):
@@ -249,6 +300,11 @@ def least_cost_path(grid, start, end, max_slope_deg=35.0, max_nodes=400000):
                 continue
             step = dist / 1000.0 / (geo.tobler_kmh(slope) * OFFTRAIL_SPEED)
             step *= steep_penalty(math.degrees(math.atan(abs(slope))))
+            if factors is not None:
+                factor = factors[nxt]
+                if factor == float("inf"):
+                    continue
+                step *= factor
             total = spent + step
             if total < cost.get(nxt, float("inf")):
                 cost[nxt] = total
@@ -268,8 +324,11 @@ def least_cost_path(grid, start, end, max_slope_deg=35.0, max_nodes=400000):
     return geo.simplify(points, tolerance), cost.get(goal, 0.0)
 
 
-def offtrail_finder(source, max_cells=180, max_slope_deg=35.0):
-    """Функция (a, b) → (точки, часы) для routing.foot_segments, или None без ЦМР."""
+def offtrail_finder(source, max_cells=180, max_slope_deg=35.0, water=None):
+    """Функция (a, b) → (точки, часы) для routing.foot_segments, или None без ЦМР.
+
+    water — озёра, болота и реки из osm.water_features: их путь обходит или пересекает с трудом.
+    """
     if source is None:
         return None
 
@@ -281,6 +340,7 @@ def offtrail_finder(source, max_cells=180, max_slope_deg=35.0):
             grid = source.grid(box, max_cells=max_cells)
         except Exception:  # noqa: BLE001 - нет тайлов/сети: пойдём по прямой
             return None
-        return least_cost_path(grid, a, b, max_slope_deg)
+        mask = water_mask(grid, water) if water else None
+        return least_cost_path(grid, a, b, max_slope_deg, mask=mask)
 
     return find

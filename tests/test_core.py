@@ -374,6 +374,22 @@ class TerrainTest(unittest.TestCase):
         self.assertGreaterEqual(max(rows), 50)       # обошли через проход
         self.assertGreater(hours, 0)
 
+    def test_lake_is_avoided_and_river_crossed_once(self):
+        values = np.full((60, 60), 500.0, np.float32)
+        grid = terrain.ElevationGrid(values, 158.0, 52.1, 0.0005, 0.0003)
+        start, end = grid.lonlat(30, 5), grid.lonlat(30, 55)
+        w, s_, e, n = grid.bbox
+        lake = [(158.012, 52.0880), (158.018, 52.0880), (158.018, 52.0940), (158.012, 52.0940), (158.012, 52.0880)]
+        river = [(158.024, s_), (158.024, n)]
+        mask = terrain.water_mask(grid, {"polygons": [("water", lake)], "lines": [("river", river)]})
+        self.assertEqual(mask[grid.cell(158.015, 52.091)], float("inf"))
+        path, hours = terrain.least_cost_path(grid, start, end, mask=mask)
+        dense = geo.densify(path, 10)
+        inside = terrain.inside(np.array([p[0] for p in dense]), np.array([p[1] for p in dense]), lake)
+        self.assertFalse(inside.any())
+        plain, plain_hours = terrain.least_cost_path(grid, start, end)
+        self.assertGreater(hours, plain_hours)        # обход озера и брод — дольше
+
     def test_blocked_returns_none(self):
         grid = self.grid_with_wall()
         grid.values[:, 30] = 2000.0
