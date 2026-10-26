@@ -35,8 +35,8 @@ class Cancelled(Exception):
     pass
 
 
-def urllib_transport(url, data, headers, timeout):
-    request = urllib.request.Request(url, data=data, headers=headers)
+def urllib_transport(url, data, headers, timeout, method=None):
+    request = urllib.request.Request(url, data=data, headers=headers, method=method)
     try:
         with urllib.request.urlopen(request, timeout=timeout) as reply:
             return reply.status, reply.read()
@@ -44,7 +44,7 @@ def urllib_transport(url, data, headers, timeout):
         return error.code, error.read() or b""
 
 
-def qgis_transport(url, data, headers, timeout):
+def qgis_transport(url, data, headers, timeout, method=None):
     """Через сетевой менеджер QGIS (его настройки прокси и сертификатов)."""
     from qgis.core import QgsBlockingNetworkRequest
     from qgis.PyQt.QtCore import QUrl
@@ -54,7 +54,9 @@ def qgis_transport(url, data, headers, timeout):
     for key, value in headers.items():
         request.setRawHeader(key.encode(), value.encode())
     blocking = QgsBlockingNetworkRequest()
-    if data is not None:
+    if method == "PUT":
+        error = blocking.put(request, data)
+    elif data is not None:
         error = blocking.post(request, data, True)
     else:
         error = blocking.get(request, True)
@@ -110,7 +112,8 @@ class Http:
             time.sleep(min(delay, 0.2))
             delay -= 0.2
 
-    def get(self, url, params=None, data=None, ttl=7 * 86400, headers=None, tries=2, timeout=None):
+    def get(self, url, params=None, data=None, ttl=7 * 86400, headers=None, tries=2, timeout=None,
+            method=None):
         """Байты ответа. data (dict или bytes) — POST. ttl — срок кэша, с (0 — без кэша)."""
         self.check()
         url = self.build_url(url, params)
@@ -129,7 +132,10 @@ class Http:
             for transport in list(self.transports):
                 self.wait_turn(url)
                 try:
-                    status, body = transport(url, data, all_headers, timeout or self.timeout)
+                    if method:
+                        status, body = transport(url, data, all_headers, timeout or self.timeout, method)
+                    else:
+                        status, body = transport(url, data, all_headers, timeout or self.timeout)
                 except NetError as error:
                     last_error = error
                     continue
@@ -142,14 +148,16 @@ class Http:
                     # этот способ работает (например, SSL через QGIS) — дальше начинаем с него
                     self.transports.remove(transport)
                     self.transports.insert(0, transport)
-                if status == 200:
+                if status in (200, 201):
                     if path:
                         os.makedirs(os.path.dirname(path), exist_ok=True)
                         with open(path, "wb") as handle:
                             handle.write(body)
                     return body
                 last_error = NetError("HTTP %s: %s" % (status, url[:120]))
-                if status in (400, 403, 404):
+                if status in (400, 401, 403, 404, 409, 422):
+                    last_error.status = status
+                    last_error.body = body
                     raise last_error
                 break  # 429/5xx — подождать и повторить
             self.check()
@@ -157,8 +165,9 @@ class Http:
                 time.sleep(1.5 * (attempt + 1))
         raise last_error or NetError(url)
 
-    def json(self, url, params=None, data=None, ttl=7 * 86400, headers=None, tries=2, timeout=None):
-        body = self.get(url, params, data, ttl, headers, tries, timeout)
+    def json(self, url, params=None, data=None, ttl=7 * 86400, headers=None, tries=2, timeout=None,
+             method=None):
+        body = self.get(url, params, data, ttl, headers, tries, timeout, method)
         try:
             return json.loads(body.decode("utf-8"))
         except ValueError as error:

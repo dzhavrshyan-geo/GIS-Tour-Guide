@@ -611,6 +611,27 @@ class DialogTest(unittest.TestCase):
             image = QImage.fromData(bytes(blob))
             self.assertEqual((image.width(), image.height()), (256, 256))
             db.close()
+
+            # публикация ссылкой (GitHub Pages)
+            import base64
+            from gis_tour_guide import publish
+            shown = []
+            dialog.settings.setValue(publish.REPO_KEY, "dzhavrshyan-geo/tours")
+            dialog.session_token = "good-token"
+            dialog.show_share = shown.append
+            dialog.share()
+            started = time.monotonic()
+            while not dialog.share_url and time.monotonic() - started < 60:
+                APP.processEvents()
+                time.sleep(0.02)
+            from gis_tour_guide.text import latin_slug
+            folder_name = latin_slug(os.path.basename(dialog.folder))
+            self.assertTrue(folder_name.startswith("gorelyy_"))
+            self.assertEqual(dialog.share_url, "https://dzhavrshyan-geo.github.io/tours/tours/%s/" % folder_name)
+            path, body = http.published
+            self.assertEqual(path, "/repos/dzhavrshyan-geo/tours/contents/tours/%s/index.html" % folder_name)
+            self.assertIn("<!DOCTYPE html>", base64.b64decode(body["content"]).decode("utf-8"))
+            self.assertTrue(shown[0].qr)
         finally:
             dialog.hide()
             task_module.Http = original

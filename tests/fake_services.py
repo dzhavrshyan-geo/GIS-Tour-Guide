@@ -285,7 +285,7 @@ class FakeHttp:
     def check(self):
         pass
 
-    def get(self, url, params=None, data=None, ttl=0, headers=None, tries=2, timeout=None):
+    def get(self, url, params=None, data=None, ttl=0, headers=None, tries=2, timeout=None, method=None):
         full = url + ("?" + urllib.parse.urlencode(params) if params else "")
         self.calls.append(full)
         host = urllib.parse.urlsplit(url).hostname
@@ -294,12 +294,16 @@ class FakeHttp:
         if "terrarium" in url:
             z, x, y = [int(v) for v in url.rsplit(".", 1)[0].split("/")[-3:]]
             return terrarium_png(z, x, y)
+        if host == "api.github.com":
+            return self.github(url, data, headers or {}, method)
+        if host == "api.qrserver.com":
+            return fake_jpeg(7)
         if host == "upload.wikimedia.org" or host == "static.inaturalist.org":
             return fake_jpeg(len(url))
         return json.dumps(self.answer(url, params or {}, data)).encode("utf-8")
 
-    def json(self, url, params=None, data=None, ttl=0, headers=None, tries=2, timeout=None):
-        return json.loads(self.get(url, params, data, ttl, headers, tries).decode("utf-8"))
+    def json(self, url, params=None, data=None, ttl=0, headers=None, tries=2, timeout=None, method=None):
+        return json.loads(self.get(url, params, data, ttl, headers, tries, method=method).decode("utf-8"))
 
     def answer(self, url, params, data):
         host = urllib.parse.urlsplit(url).hostname
@@ -470,6 +474,24 @@ class FakeHttp:
             ]}
         raise NetError("Неизвестный адрес в тесте: " + url)
 
+
+    def github(self, url, data, headers, method):
+        """Поддельный GitHub: репозиторий есть, Pages выключены — включаются POST-ом."""
+        if headers.get("Authorization") != "Bearer good-token":
+            error = NetError("HTTP 401")
+            error.status = 401
+            raise error
+        path = urllib.parse.urlsplit(url).path
+        if method == "PUT":
+            self.published = (urllib.parse.unquote(path), json.loads(data.decode()))
+            return json.dumps({"content": {"path": path}}).encode()
+        if path.endswith("/pages"):
+            if data is None:
+                error = NetError("HTTP 404")
+                error.status = 404
+                raise error
+            return json.dumps({"html_url": "https://dzhavrshyan-geo.github.io/tours/"}).encode()
+        return json.dumps({"default_branch": "main", "visibility": "public"}).encode()
 
     def urban_answer(self, host, path, params, data):
         """Ответы для городского сценария; None — как в природном."""

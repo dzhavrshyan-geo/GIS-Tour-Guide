@@ -20,7 +20,7 @@ from . import brand, maps, offline, osm, report, schedule
 from .planner import COLLECT_STAGES, PLAN_STAGES, Settings
 from .progress import ProgressDialog
 from .task import FINISH_STAGES, OFFLINE_STAGES, TASK_STAGES, CollectTask, GeocodeTask, OfflineTask, TourTask
-from .text import fmt_hours, fmt_km, slug
+from .text import fmt_hours, fmt_km, latin_slug, slug
 from .widgets import CheckableComboBox
 
 KEY = "gis_tour_guide/"
@@ -65,6 +65,8 @@ class TourGuideDialog(QDialog):
         self.layouts = {}
         self.added = {}
         self.offline_path = ""
+        self.share_url = ""
+        self.session_token = ""
         self.gpx = ""                # трек хранится в памяти, пока открыто окно
         self.kml = ""
         self.gpx_name = "tour.gpx"
@@ -265,6 +267,14 @@ class TourGuideDialog(QDialog):
         self.offline_button.setToolTip("Архив для телефона: офлайн-карта района (MBTiles), трек GPX и KML, "
                                        "отчёт HTML и PDF")
         self.offline_button.clicked.connect(self.make_offline)
+        self.share_button = QToolButton()
+        self.share_button.setText("Поделиться ссылкой")
+        self.share_button.setPopupMode(QToolButton.ToolButtonPopupMode.MenuButtonPopup)
+        self.share_button.setToolTip("Выложить отчёт на GitHub Pages и получить ссылку и QR-код для телефона")
+        self.share_button.clicked.connect(self.share)
+        share_menu = QMenu(self.share_button)
+        share_menu.addAction("Настройки публикации (GitHub)…", self.share_settings)
+        self.share_button.setMenu(share_menu)
         folder = QPushButton("Папка")
         folder.clicked.connect(lambda: self.open_file(""))
         self.layouts_button = QToolButton()
@@ -272,7 +282,8 @@ class TourGuideDialog(QDialog):
         self.layouts_button.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
         self.layouts_menu = QMenu(self.layouts_button)
         self.layouts_button.setMenu(self.layouts_menu)
-        for widget in (self.pdf_button, self.gpx_button, self.offline_button, folder, self.layouts_button):
+        for widget in (self.pdf_button, self.gpx_button, self.share_button, self.offline_button, folder,
+                       self.layouts_button):
             row.addWidget(widget)
         row.addStretch(1)
         layout.addLayout(row)
@@ -808,6 +819,106 @@ class TourGuideDialog(QDialog):
 
         self.run_task(OfflineTask(box, tour.urban, self.cache_dir()), "Офлайн-пакет: %s" % tour.place.name,
                       OFFLINE_STAGES, done)
+
+    # --- Публикация ссылкой ---
+
+    def share_settings(self):
+        """Репозиторий и токен GitHub; токен — в зашифрованном хранилище QGIS."""
+        from qgis.PyQt.QtWidgets import QDialogButtonBox
+        from . import publish
+        box = QDialog(self)
+        box.setWindowTitle("Публикация отчётов — GitHub Pages")
+        box.setStyleSheet(brand.WINDOW_QSS)
+        layout = QVBoxLayout(box)
+        hint = QLabel(
+            "Отчёт будет выложен в ваш репозиторий на GitHub и открываться по ссылке с любого телефона.<br><br>"
+            "1. Создайте публичный репозиторий, например <b>tours</b>.<br>"
+            "2. Создайте токен: <a href='https://github.com/settings/personal-access-tokens/new'>"
+            "github.com → Settings → Developer settings → Fine-grained tokens</a>, доступ только к этому "
+            "репозиторию, права <b>Contents: Read and write</b> и <b>Pages: Read and write</b>.<br>"
+            "3. Вставьте сюда имя репозитория и токен. Токен хранится зашифрованным в QGIS "
+            "(может спросить мастер-пароль).")
+        hint.setWordWrap(True)
+        hint.setOpenExternalLinks(True)
+        layout.addWidget(hint)
+        form = QFormLayout()
+        repo = QLineEdit(self.settings.value(publish.REPO_KEY, ""))
+        repo.setPlaceholderText("владелец/репозиторий, например dzhavrshyan-geo/tours")
+        token = QLineEdit(self.share_token())
+        token.setEchoMode(QLineEdit.EchoMode.Password)
+        form.addRow("Репозиторий:", repo)
+        form.addRow("Токен:", token)
+        layout.addLayout(form)
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Save | QDialogButtonBox.StandardButton.Cancel)
+        buttons.accepted.connect(box.accept)
+        buttons.rejected.connect(box.reject)
+        layout.addWidget(buttons)
+        if box.exec() != QDialog.DialogCode.Accepted:
+            return False
+        self.settings.setValue(publish.REPO_KEY, repo.text().strip())
+        self.session_token = token.text().strip()
+        try:
+            stored = QgsApplication.authManager().storeAuthSetting(publish.TOKEN_KEY, self.session_token, True)
+        except Exception:  # noqa: BLE001 - хранилище недоступно
+            stored = False
+        if not stored:
+            self.log("⚠ Токен не сохранён в хранилище QGIS (нет мастер-пароля) — будет действовать до закрытия QGIS.")
+        return bool(repo.text().strip() and self.session_token)
+
+    def share_token(self):
+        from . import publish
+        if getattr(self, "session_token", ""):
+            return self.session_token
+        try:
+            return QgsApplication.authManager().authSetting(publish.TOKEN_KEY, "", True) or ""
+        except Exception:  # noqa: BLE001
+            return ""
+
+    def share(self):
+        from . import publish
+        from .task import PublishTask
+        if self.task is not None or not self.folder:
+            return
+        html_path = os.path.join(self.folder, "report.html")
+        if not os.path.exists(html_path):
+            self.log("Отчёта нет — создайте экскурсию заново.")
+            return
+        repo, token = self.settings.value(publish.REPO_KEY, ""), self.share_token()
+        if not repo or not token:
+            if not self.share_settings():
+                return
+            repo, token = self.settings.value(publish.REPO_KEY, ""), self.share_token()
+        with open(html_path, encoding="utf-8") as handle:
+            html = handle.read()
+
+        def done(task):
+            self.share_url = task.url
+            self.result_link.setText(self.result_link.text() + "<br>Ссылка: <a href='%s' style='color:%s'>%s</a>"
+                                     % (task.url, brand.GREEN, task.url))
+            self.show_share(task)
+
+        self.run_task(PublishTask(html, repo, token, latin_slug(os.path.basename(self.folder)), self.cache_dir()),
+                      "", None, done)
+        self.log("Публикую отчёт в %s…" % repo)
+
+    def show_share(self, task):
+        from qgis.PyQt.QtGui import QGuiApplication, QPixmap
+        box = QMessageBox(self)
+        box.setWindowTitle(brand.NAME)
+        box.setText("Отчёт опубликован:<br><a href='%s'>%s</a><br><br>GitHub Pages обновляется "
+                    "1–2 минуты — если ссылка сразу не открылась, подождите.%s" % (
+                        task.url, task.url, "<br><br>⚠ " + task.note if task.note else ""))
+        box.setTextFormat(Qt.TextFormat.RichText)
+        if task.qr:
+            pixmap = QPixmap()
+            pixmap.loadFromData(task.qr)
+            box.setIconPixmap(pixmap)
+        copy = box.addButton("Скопировать ссылку", QMessageBox.ButtonRole.ActionRole)
+        box.addButton(QMessageBox.StandardButton.Ok)
+        box.exec()
+        if box.clickedButton() is copy:
+            QGuiApplication.clipboard().setText(task.url)
+            self.status.setText("✓ Ссылка скопирована: %s" % task.url)
 
     def open_layout(self, key):
         name = self.layouts.get(key)

@@ -171,6 +171,22 @@ class UrbanAndStartTest(unittest.TestCase):
         self.assertEqual(pois[2].popularity, 0)
 
 
+class PublishTest(unittest.TestCase):
+
+    def test_bad_token_and_repo_name(self):
+        sys.path.insert(0, os.path.dirname(__file__))
+        from fake_services import FakeHttp
+        from gis_tour_guide import publish
+        with self.assertRaises(net.NetError) as error:
+            publish.publish(FakeHttp(), "bad", "owner/tours", "x", "<html>")
+        self.assertIn("токен", str(error.exception))
+        with self.assertRaises(net.NetError):
+            publish.publish(FakeHttp(), "good-token", "tours", "x", "<html>")
+        url, note = publish.publish(FakeHttp(), "good-token", "dzhavrshyan-geo/tours", "горелый_1", "<html>")
+        self.assertEqual(url, "https://dzhavrshyan-geo.github.io/tours/tours/%D0%B3%D0%BE%D1%80%D0%B5%D0%BB%D1%8B%D0%B9_1/")
+        self.assertEqual(note, "")
+
+
 class HedgedOverpassTest(unittest.TestCase):
 
     def test_slow_mirror_does_not_block(self):
@@ -444,7 +460,7 @@ class HttpTest(unittest.TestCase):
     def test_cache_and_errors(self):
         calls = []
 
-        def transport(url, data, headers, timeout):
+        def transport(url, data, headers, timeout, method=None):
             calls.append((url, data, headers["User-Agent"]))
             if "missing" in url:
                 return 404, b""

@@ -140,3 +140,21 @@ class OfflineTask(BaseTask):
         self.stage("base", 0)
         self.features = osm.offline_base(self.http(), self.bbox, self.urban)
         self.stage("base", 1)
+
+
+class PublishTask(BaseTask):
+    """Выложить отчёт на GitHub Pages и получить QR-код ссылки."""
+
+    def __init__(self, html, repo, token, folder_name, cache_dir):
+        super().__init__("ГИС-экскурсовод: публикация отчёта", cache_dir)
+        self.html, self.repo, self.token, self.folder_name = html, repo, token, folder_name
+        self.url, self.note, self.qr = "", "", None
+
+    def work(self):
+        from . import publish
+        http = Http(None, is_cancelled=self.isCanceled, timeout=120)     # без кэша
+        self.url, self.note = publish.publish(http, self.token, self.repo, self.folder_name, self.html)
+        try:
+            self.qr = publish.qr_png(http, self.url)
+        except NetError:
+            self.qr = None

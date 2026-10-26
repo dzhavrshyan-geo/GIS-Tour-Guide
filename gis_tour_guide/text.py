@@ -87,3 +87,15 @@ TYPE_WORDS = {
     "volcano": "volcano", "mount": "peak", "mt": "peak", "cave": "cave", "lake": "lake",
     "waterfall": "waterfall", "falls": "waterfall",
 }
+
+
+TRANSLIT = dict(zip("абвгдеёжзийклмнопрстуфхцчшщъыьэюя",
+                    ["a", "b", "v", "g", "d", "e", "e", "zh", "z", "i", "y", "k", "l", "m", "n", "o", "p",
+                     "r", "s", "t", "u", "f", "kh", "ts", "ch", "sh", "shch", "", "y", "", "e", "yu", "ya"]))
+
+
+def latin_slug(value, limit=60):
+    """«Горелый_20261026» → «gorelyy_20261026» — для ссылок."""
+    out = "".join(TRANSLIT.get(ch, ch) for ch in (value or "").lower())
+    out = re.sub(r"[^a-z0-9\-]+", "_", out).strip("_")
+    return out[:limit] or "tour"
