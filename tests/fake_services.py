@@ -165,6 +165,18 @@ TRAILS = [
     {"type": "way", "id": 5002, "nodes": [3, 4, 5], "geometry": [{"lon": x, "lat": y} for x, y in TRAIL_POINTS[2:]]},
 ]
 
+def way(ident, tags, points):
+    return {"type": "way", "id": ident, "tags": tags, "geometry": [{"lon": x, "lat": y} for x, y in points]}
+
+
+OFFLINE_BASE = [
+    way(1101, {"highway": "secondary", "ref": "Р-474"}, [(158.20, 52.70), (158.12, 52.62), TRAILHEAD]),
+    way(1102, {"highway": "path"}, [TRAILHEAD, (158.06, 52.575), (158.03, 52.558)]),
+    way(1103, {"natural": "wood"}, [(158.07, 52.60), (158.11, 52.60), (158.11, 52.62), (158.07, 52.62),
+                                    (158.07, 52.60)]),
+    way(1104, {"waterway": "river"}, [(158.00, 52.53), (158.05, 52.60), (158.10, 52.65)]),
+]
+
 NEAR_VILLAGES = [
     {"type": "node", "id": 54, "lat": 52.83, "lon": 158.18, "tags": {"place": "village", "name": "Термальный"}},
     {"type": "node", "id": 55, "lat": 52.91, "lon": 158.22, "tags": {"place": "village", "name": "Паратунка"}},
@@ -329,6 +341,8 @@ class FakeHttp:
                     {"type": "count", "id": 0, "tags": {"ways": "0", "total": "0"}}]}
             if '"tourism"~"^(hotel' in query:
                 return {"elements": NATURE_LODGING}
+            if 'way["highway"]' in query and "out geom" in query:
+                return {"elements": OFFLINE_BASE + WATER}
             if 'route"~"^(hiking|foot)$"' in query:
                 return {"elements": TRAILS}
             if "out geom" in query:

@@ -846,3 +846,47 @@ def hiking_trails(http, bbox):
     for way in ways:
         way["name"] = names.get(way["id"], "")
     return ways
+
+
+# --- Основа для офлайн-карты: дороги, тропы, вода, лес, здания ---
+
+def offline_base(http, bbox, urban=False):
+    """Векторы для собственной офлайн-подложки: {вид: [(теги, координаты, замкнут)]}."""
+    box = bbox_filter(bbox)
+    parts = [
+        'way["highway"]%s;' % box,
+        'way["natural"~"^(water|wood|scrub|glacier|wetland|bare_rock|scree)$"]%s;' % box,
+        'way["landuse"~"^(forest|grass|meadow|residential)$"]%s;' % box,
+        'way["leisure"~"^(park|garden)$"]%s;' % box,
+        'way["waterway"~"^(river|stream|canal)$"]%s;' % box,
+    ]
+    if urban:
+        parts.append('way["building"]%s;' % box)
+    query = "[out:json][timeout:90];(\n%s\n);out geom;" % "\n".join(parts)
+    result = {}
+    for element in overpass(http, query, ttl=30 * 86400):
+        tags = element.get("tags") or {}
+        coords = [(p["lon"], p["lat"]) for p in element.get("geometry") or [] if "lon" in p]
+        if len(coords) < 2:
+            continue
+        closed = coords[0] == coords[-1] and len(coords) > 3
+        if tags.get("building"):
+            kind = "building"
+        elif tags.get("highway"):
+            value = tags["highway"]
+            kind = "major" if value in ("motorway", "trunk", "primary", "secondary") else \
+                "path" if value in ("path", "footway", "track", "bridleway", "steps", "cycleway") else "road"
+        elif tags.get("waterway"):
+            kind = "river"
+        elif tags.get("natural") in ("water", "wetland", "glacier"):
+            kind = tags["natural"]
+        elif tags.get("natural") in ("bare_rock", "scree"):
+            kind = "rock"
+        elif tags.get("leisure") or tags.get("landuse") in ("grass", "meadow"):
+            kind = "park"
+        elif tags.get("landuse") == "residential":
+            kind = "residential"
+        else:
+            kind = "forest"
+        result.setdefault(kind, []).append((tags, coords, closed))
+    return result

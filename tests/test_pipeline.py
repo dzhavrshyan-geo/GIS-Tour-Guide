@@ -582,6 +582,35 @@ class DialogTest(unittest.TestCase):
             dialog.progress.on_button()                       # «Закрыть» окно загрузки
             APP.processEvents()
             self.assertTrue(dialog.gpx_button.isEnabled())
+
+            # офлайн-пакет: архив с отчётом, треками и собственной картой района
+            import sqlite3
+            import zipfile
+            dialog.make_offline()
+            started = time.monotonic()
+            while not dialog.offline_path and time.monotonic() - started < 120:
+                APP.processEvents()
+                time.sleep(0.02)
+            self.assertTrue(dialog.offline_path.endswith("_offline.zip"))
+            with zipfile.ZipFile(dialog.offline_path) as archive:
+                names = sorted(archive.namelist())
+                self.assertEqual(names, ["README.txt", "report.html", "report.pdf", "горелый.gpx",
+                                         "горелый.kml", "горелый.mbtiles"])
+                tiles_path = os.path.join(folder, "check.mbtiles")
+                with open(tiles_path, "wb") as handle:
+                    handle.write(archive.read("горелый.mbtiles"))
+            db = sqlite3.connect(tiles_path)
+            meta = dict(db.execute("SELECT name, value FROM metadata"))
+            self.assertEqual(meta["format"], "png")
+            count = db.execute("SELECT COUNT(*) FROM tiles").fetchone()[0]
+            self.assertGreater(count, 20)
+            self.assertLessEqual(count, 3000)
+            from qgis.PyQt.QtGui import QImage
+            blob = db.execute("SELECT tile_data FROM tiles WHERE zoom_level = ? LIMIT 1",
+                              (int(meta["maxzoom"]) - 3,)).fetchone()[0]
+            image = QImage.fromData(bytes(blob))
+            self.assertEqual((image.width(), image.height()), (256, 256))
+            db.close()
         finally:
             dialog.hide()
             task_module.Http = original

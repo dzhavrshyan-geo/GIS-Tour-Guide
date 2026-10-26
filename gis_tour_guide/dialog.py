@@ -16,10 +16,10 @@ from qgis.PyQt.QtWidgets import (
     QSizePolicy, QToolButton, QVBoxLayout, QWidget,
 )
 
-from . import brand, maps, osm, report, schedule
+from . import brand, maps, offline, osm, report, schedule
 from .planner import COLLECT_STAGES, PLAN_STAGES, Settings
 from .progress import ProgressDialog
-from .task import FINISH_STAGES, TASK_STAGES, CollectTask, GeocodeTask, TourTask
+from .task import FINISH_STAGES, OFFLINE_STAGES, TASK_STAGES, CollectTask, GeocodeTask, OfflineTask, TourTask
 from .text import fmt_hours, fmt_km, slug
 from .widgets import CheckableComboBox
 
@@ -63,6 +63,8 @@ class TourGuideDialog(QDialog):
         self.tour = None
         self.folder = ""
         self.layouts = {}
+        self.added = {}
+        self.offline_path = ""
         self.gpx = ""                # трек хранится в памяти, пока открыто окно
         self.kml = ""
         self.gpx_name = "tour.gpx"
@@ -259,6 +261,10 @@ class TourGuideDialog(QDialog):
         self.gpx_button.setToolTip("Трек и точки для навигатора: GPX или KML (Organic Maps, Maps.me). "
                                    "Хранится в памяти, пока открыто окно плагина.")
         self.gpx_button.clicked.connect(self.save_gpx)
+        self.offline_button = QPushButton("Офлайн-пакет")
+        self.offline_button.setToolTip("Архив для телефона: офлайн-карта района (MBTiles), трек GPX и KML, "
+                                       "отчёт HTML и PDF")
+        self.offline_button.clicked.connect(self.make_offline)
         folder = QPushButton("Папка")
         folder.clicked.connect(lambda: self.open_file(""))
         self.layouts_button = QToolButton()
@@ -266,7 +272,7 @@ class TourGuideDialog(QDialog):
         self.layouts_button.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
         self.layouts_menu = QMenu(self.layouts_button)
         self.layouts_button.setMenu(self.layouts_menu)
-        for widget in (self.pdf_button, self.gpx_button, folder, self.layouts_button):
+        for widget in (self.pdf_button, self.gpx_button, self.offline_button, folder, self.layouts_button):
             row.addWidget(widget)
         row.addStretch(1)
         layout.addLayout(row)
@@ -675,6 +681,7 @@ class TourGuideDialog(QDialog):
             layers = maps.build_layers(tour)
             saved = maps.save_gpkg(layers, os.path.join(folder, "tour.gpkg"), task.dem_grid, self.log)
             _group, added = maps.add_to_project(tour, saved, basemap)
+            self.added = added
             progress.update_stage("layers", 1)
             progress.update_stage("maps", 0)
             QgsApplication.processEvents()
@@ -761,6 +768,46 @@ class TourGuideDialog(QDialog):
             return
         self.log("Трек сохранён: %s" % path)
         self.status.setText("✓ Трек сохранён: %s" % path)
+
+    def make_offline(self):
+        """Офлайн-пакет: векторы OSM (фон) → тайлы района → zip с отчётом и треками."""
+        if self.task is not None or self.tour is None or not self.gpx:
+            return
+        tour, folder = self.tour, self.folder
+        box = offline.area(tour)
+
+        def done(task):
+            progress = self.progress
+            try:
+                route = [self.added[k] for k in ("stops", "lodging", "walk", "trails") if k in self.added]
+                layers = offline.stack(route, task.features, self.added.get("hillshade"))
+                zmin, zmax = offline.zoom_range(box, tour.urban)
+                name = slug(tour.place.name)
+                path = os.path.join(folder, "%s.mbtiles" % name)
+                progress.update_stage("tiles", 0)
+
+                def step(fraction):
+                    progress.update_stage("tiles", fraction)
+                    QgsApplication.processEvents()
+
+                offline.render_mbtiles(layers, box, path, zmin, zmax, tour.place.name, step)
+                progress.update_stage("zip", 0)
+                QgsApplication.processEvents()
+                package = offline.make_package(folder, name, tour, self.gpx, self.kml, path, zmin, zmax)
+                os.remove(path)            # карта уже в архиве
+                progress.update_stage("zip", 1)
+                progress.finish("Офлайн-пакет готов")
+                self.offline_path = package
+                self.result_link.setText(self.result_link.text() + "<br>Офлайн-пакет: <a href='%s' style='color:%s'>%s</a>"
+                                         % (QUrl.fromLocalFile(package).toString(), brand.GREEN, package))
+                self.log("Офлайн-пакет: %s (масштабы %d–%d)" % (package, zmin, zmax))
+            except Exception as error:  # noqa: BLE001
+                import traceback
+                self.log("Ошибка офлайн-пакета: %s\n%s" % (error, traceback.format_exc()))
+                progress.fail("Ошибка офлайн-пакета: %s" % error)
+
+        self.run_task(OfflineTask(box, tour.urban, self.cache_dir()), "Офлайн-пакет: %s" % tour.place.name,
+                      OFFLINE_STAGES, done)
 
     def open_layout(self, key):
         name = self.layouts.get(key)

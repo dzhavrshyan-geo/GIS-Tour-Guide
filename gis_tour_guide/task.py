@@ -6,7 +6,7 @@ import traceback
 from qgis.core import QgsTask
 from qgis.PyQt.QtCore import pyqtSignal
 
-from . import geo, geocode, report, terrain
+from . import geo, geocode, osm, report, terrain
 from .maps import enum
 from .net import Cancelled, Http, NetError
 from .planner import Planner
@@ -15,6 +15,8 @@ CAN_CANCEL = enum(QgsTask, "CanCancel", "Flag.CanCancel")
 
 # Этапы фоновой задачи после planner.plan и этапы главного потока (слои, карты, отчёт)
 TASK_STAGES = [("images", "Загрузка фотографий", 3), ("relief", "Рельеф для карт", 4)]
+OFFLINE_STAGES = [("base", "Дороги, тропы и вода для офлайн-карты", 3),
+                  ("tiles", "Офлайн-карта района (MBTiles)", 6), ("zip", "Архив для телефона", 1)]
 FINISH_STAGES = [("layers", "Слои и GeoPackage", 2), ("maps", "Карты-схемы", 6),
                  ("report", "Отчёт HTML и PDF", 3)]
 
@@ -124,3 +126,17 @@ class TourTask(BaseTask):
         except Exception as error:  # noqa: BLE001 - без отмывки рельефа тоже можно
             self.log("⚠ Рельеф для карты не получен: %s" % error)
             return None
+
+
+class OfflineTask(BaseTask):
+    """Векторы OSM для собственной офлайн-подложки (рисуется потом в главном потоке)."""
+
+    def __init__(self, bbox, urban, cache_dir):
+        super().__init__("ГИС-экскурсовод: офлайн-карта", cache_dir)
+        self.bbox, self.urban = bbox, urban
+        self.features = {}
+
+    def work(self):
+        self.stage("base", 0)
+        self.features = osm.offline_base(self.http(), self.bbox, self.urban)
+        self.stage("base", 1)
