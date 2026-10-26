@@ -64,6 +64,10 @@ QCheckBox { color: %(ink)s; }
 QCheckBox::indicator:checked { background: %(green)s; border: 1px solid %(green)s; border-radius: 3px; }
 QCheckBox::indicator:unchecked { background: white; border: 1px solid #b9cdb3; border-radius: 3px; }
 QScrollArea { border: none; background: transparent; }
+QPushButton#Variant { text-align: left; padding: 6px 8px; background: white; color: %(ink)s;
+                      border: 1px solid #c8d6c1; border-radius: 6px; }
+QPushButton#Variant:checked { background: %(green_soft)s; border: 2px solid %(green)s; color: %(green_dark)s; }
+QPushButton#Variant:hover { border-color: %(green)s; }
 """ % {"paper": PAPER, "green": GREEN, "green_dark": GREEN_DARK, "green_soft": GREEN_SOFT,
        "line": LINE, "sand": SAND, "sand_soft": SAND_SOFT, "ink": INK, "muted": MUTED,
        "route": ROUTE}

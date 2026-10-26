@@ -207,6 +207,17 @@ class NatureTest(unittest.TestCase):
         few = schedule.estimate(tour, [])
         self.assertLess(few["walk_km"], guess["walk_km"])
 
+    def test_route_variants(self):
+        from gis_tour_guide import schedule
+        half, day, two = schedule.variants(self.tour)
+        self.assertEqual([v["key"] for v in (half, day, two)], ["half", "day", "two"])
+        for variant in (half, day, two):
+            guess = variant["estimate"]
+            self.assertLessEqual(guess["walk_h"] + guess["visit_h"], variant["budget"] + 1e-6)
+        self.assertLessEqual(len(half["uids"]), len(day["uids"]))
+        self.assertLess(len(day["uids"]), len(two["uids"]))
+        self.assertTrue(set(half["uids"]) <= set(two["uids"]) or len(half["uids"]) <= 1)
+
     def test_advice(self):
         text_ = "\n".join(item for _, items in self.tour.advice for item in items)
         for needle in ("Бурый медведь", "Южно-Камчатский природный парк", "Магазинов поблизости нет",
@@ -428,6 +439,13 @@ class DialogTest(unittest.TestCase):
             self.assertIn("Отмечено 3 из", dialog.checklist.lineEdit().text())
             self.assertTrue(dialog.estimate_label.isVisibleTo(dialog))
             self.assertIn("Ориентировочно", dialog.estimate_label.text())
+            # варианты: полдня / день / два дня — щелчок ставит галочки
+            self.assertTrue(all(b.isEnabled() for b in dialog.variant_buttons.values()))
+            self.assertIn("Полный день — ", dialog.variant_buttons["day"].text())
+            dialog.apply_variant("half")
+            self.assertEqual(dialog.checklist.checked_data(), dialog.variant_data["half"]["uids"])
+            self.assertTrue(dialog.variant_buttons["half"].isChecked())
+            dialog.recheck_top()
             dialog.max_points.setValue(1)                     # топ-1 без нового поиска
             self.assertEqual(dialog.checklist.checked_data(), [collecting.tour.candidates[1].uid])
             # изменили радиус — подобранные объекты сбрасываются

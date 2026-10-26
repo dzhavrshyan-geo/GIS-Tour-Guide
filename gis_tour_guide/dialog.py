@@ -13,7 +13,7 @@ from qgis.PyQt.QtGui import QDesktopServices, QIcon
 from qgis.PyQt.QtWidgets import (
     QCheckBox, QComboBox, QDateEdit, QDialog, QFileDialog, QFormLayout, QFrame, QGridLayout, QGroupBox,
     QHBoxLayout, QLabel, QLineEdit, QMenu, QMessageBox, QPushButton, QScrollArea, QSpinBox,
-    QToolButton, QVBoxLayout, QWidget,
+    QSizePolicy, QToolButton, QVBoxLayout, QWidget,
 )
 
 from . import brand, maps, osm, report, schedule
@@ -97,8 +97,9 @@ class TourGuideDialog(QDialog):
         outer.addWidget(self.status)
         self.load_settings()
         self.update_state()
-        self.date.dateChanged.connect(self.update_estimate)
-        self.loop.currentIndexChanged.connect(self.update_estimate)
+        for signal in (self.date.dateChanged, self.loop.currentIndexChanged):
+            signal.connect(self.update_variants)
+            signal.connect(self.update_estimate)
 
     # --- Разделы окна ---
 
@@ -164,6 +165,22 @@ class TourGuideDialog(QDialog):
         self.neighbours_hint.setObjectName("Hint")
         self.neighbours_hint.setWordWrap(True)
         form.addRow(self.neighbours_hint)
+        variants = QVBoxLayout()
+        variants.setSpacing(4)
+        self.variant_buttons = {}
+        for key, title, _note in schedule.VARIANTS:
+            button = QPushButton(title)
+            button.setObjectName("Variant")
+            button.setCheckable(True)
+            button.setEnabled(False)
+            button.setMinimumWidth(60)
+            button.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed)
+            button.setToolTip("Отметить объекты, которые помещаются в этот вариант")
+            button.clicked.connect(lambda _checked, k=key: self.apply_variant(k))
+            variants.addWidget(button)
+            self.variant_buttons[key] = button
+        form.addRow("Варианты:", variants)
+        self.variant_data = {}
         self.estimate_label = QLabel("")
         self.estimate_label.setObjectName("PlaceInfo")
         self.estimate_label.setWordWrap(True)
@@ -335,6 +352,7 @@ class TourGuideDialog(QDialog):
         place = self.current_place()
         self.collected = None
         self.checklist.set_items([])
+        self.update_variants()
         self.update_estimate()
         if place is None:
             self.place_info.setText("Введите название и нажмите «Найти».")
@@ -504,6 +522,7 @@ class TourGuideDialog(QDialog):
                     "через минуту. " % ", ".join(tour.failed_sources)) + text
         self.neighbours_hint.setText(text)
         self.update_state()
+        self.update_variants()
         self.update_estimate()
 
     def offer_wider_zone(self, tour):
@@ -522,9 +541,49 @@ class TourGuideDialog(QDialog):
         self.half_km.setValue(wider)
         return True
 
+    def update_variants(self, *_args):
+        """Три варианта — полдня, день, два дня — по текущим дате и типу маршрута."""
+        tour = self.collected
+        self.variant_data = {}
+        for key, button in self.variant_buttons.items():
+            button.setEnabled(tour is not None)
+            if tour is None:
+                button.setText(dict((k, t) for k, t, _ in schedule.VARIANTS)[key])
+        if tour is None:
+            return
+        tour.date = self.date.date().toString("yyyy-MM-dd")
+        for item in schedule.variants(tour, self.loop.currentIndex() == 0):
+            guess = item["estimate"]
+            count = len(item["uids"]) + 1
+            self.variant_data[item["key"]] = item
+            button = self.variant_buttons[item["key"]]
+            button.setText("%s — %d об. · %s · ~%s" % (
+                item["title"], count, fmt_km(guess["walk_km"] * 1000),
+                fmt_hours(guess["walk_h"] + guess["visit_h"])))
+            button.setToolTip("%s: %s" % (item["title"], ", ".join(
+                p.name for p in tour.candidates if p.uid in item["uids"]) or "только главный объект"))
+        self.mark_variant()
+
+    def apply_variant(self, key):
+        item = self.variant_data.get(key)
+        if not item:
+            return
+        self.checklist.set_checked(item["uids"])
+        self.update_state()
+        self.update_estimate()
+
+    def mark_variant(self):
+        """Подсветить вариант, если галочки совпадают с ним."""
+        checked = set(self.checklist.checked_data())
+        for key, button in self.variant_buttons.items():
+            item = self.variant_data.get(key)
+            button.setChecked(bool(item) and set(item["uids"]) == checked)
+
     def update_estimate(self, *_args):
         """Оценка по прямым при каждом изменении галочек: успеть ли за день."""
         tour = self.collected
+        if hasattr(self, "variant_buttons"):
+            self.mark_variant()
         if tour is None:
             self.estimate_label.setVisible(False)
             return

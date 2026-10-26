@@ -63,7 +63,7 @@ def plan_days(tour):
     return days
 
 
-def estimate(tour, chosen_uids, loop=True, start=None):
+def estimate(tour, chosen_uids, loop=True, start=None, fast=False):
     """Быстрая оценка до прокладки маршрута: по прямым, с поправкой на извилистость.
 
     → {walk_km, walk_h, visit_h, drive_h, total_h, daylight, overnight, days}
@@ -73,7 +73,12 @@ def estimate(tour, chosen_uids, loop=True, start=None):
     chosen = set(chosen_uids)
     points = [main] + [p for p in tour.candidates[1:] if p.uid in chosen]
     dist = [[geo.dist_m(a.point, b.point) for b in points] for a in points]
-    order = tsp.solve(dist, loop) if len(points) > 1 else [0]
+    if len(points) < 2:
+        order = [0]
+    elif fast:   # для перебора вариантов — эвристика, точное решение тут слишком медленное
+        order = tsp.two_opt(tsp.nearest_neighbour(dist), dist, loop)
+    else:
+        order = tsp.solve(dist, loop)
     walk_m = tsp.tour_cost(order, dist, loop) * DETOUR[mode]
     walk_h = walk_m / 1000.0 / SPEED_KMH[mode]
     visit_h = sum(visit_hours(p, mode) for p in points)
@@ -92,3 +97,50 @@ def estimate(tour, chosen_uids, loop=True, start=None):
     return {"walk_km": walk_m / 1000.0, "walk_h": walk_h, "visit_h": visit_h, "drive_h": drive_h,
             "total_h": total, "daylight": light, "days": days,
             "overnight": walk_h + visit_h > budget or total > min(light + 1.5, 13.0)}
+
+
+# --- Варианты маршрута ---
+
+NOT_AUTO = ("camp", "picnic", "hut")
+VARIANTS = [("half", "Полдня", "короткий"), ("day", "Полный день", "на весь день"),
+            ("two", "2 дня с ночёвкой", "с ночлегом")]
+
+
+def variant_budgets(tour, drive_h):
+    """Часы на прогулку с осмотром для каждого варианта."""
+    budget = day_budget(tour)
+    return {"half": 4.5, "day": max(3.0, budget - drive_h), "two": max(6.0, 2 * budget - drive_h)}
+
+
+def variants(tour, loop=True, limit=20):
+    """Три варианта: самые популярные объекты, пока прогулка помещается во время варианта.
+
+    → [{key, title, note, uids, estimate}]
+    """
+    pool = [p for p in tour.candidates[1:] if p.category not in NOT_AUTO][:limit * 2]
+    first = estimate(tour, [], loop)
+    budgets = variant_budgets(tour, first["drive_h"])
+    result = []
+    for key, title, note in VARIANTS:
+        chosen, spent = [], estimate(tour, [], loop, fast=True)
+        spent = spent["walk_h"] + spent["visit_h"]
+        left = list(pool)
+        while left and len(chosen) < limit:
+            # берём объект, дающий больше всего «популярности» на час добавленного пути
+            best = None
+            for poi in left:
+                trial = estimate(tour, chosen + [poi.uid], loop, fast=True)
+                hours = trial["walk_h"] + trial["visit_h"]
+                if hours > budgets[key]:
+                    continue
+                value = (poi.rank + 10.0) / (hours - spent + 0.25)   # +10 — ценность самого визита
+                if best is None or value > best[0]:
+                    best = (value, poi, hours)
+            if best is None:
+                break
+            chosen.append(best[1].uid)
+            spent = best[2]
+            left.remove(best[1])
+        result.append({"key": key, "title": title, "note": note, "uids": chosen,
+                       "estimate": estimate(tour, chosen, loop), "budget": budgets[key]})
+    return result
