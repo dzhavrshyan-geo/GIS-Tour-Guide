@@ -227,6 +227,32 @@ class HedgedOverpassTest(unittest.TestCase):
         self.assertEqual(osm.segment({"tourism": "wilderness_hut"}), "budget")
 
 
+class SeasonTest(unittest.TestCase):
+
+    def test_opening_hours(self):
+        import datetime
+        from gis_tour_guide import hours
+        mon, tue, jul = datetime.date(2026, 10, 26), datetime.date(2026, 10, 27), datetime.date(2026, 7, 7)
+        self.assertEqual(hours.status("Mo,We-Su 10:00-18:00", tue), ("closed", ""))
+        self.assertEqual(hours.status("Tu-Su 10:00-18:00; Mo off", mon), ("closed", ""))
+        self.assertEqual(hours.status("Tu-Su 10:00-18:00; Mo off", tue), ("open", "10:00-18:00"))
+        self.assertEqual(hours.status("May-Sep Mo-Su 09:00-20:00", jul), ("open", "09:00-20:00"))
+        self.assertEqual(hours.status("May-Sep Mo-Su 09:00-20:00", mon), ("closed", ""))
+        self.assertEqual(hours.status("24/7", mon), ("open", "круглосуточно"))
+        self.assertEqual(hours.status("PH off", mon), (None, ""))
+        self.assertEqual(hours.status("sunrise-sunset", mon), (None, ""))
+        self.assertEqual(hours.status("", mon), (None, ""))
+
+    def test_seasonal_roads(self):
+        self.assertEqual(osm.months_of("no @ (Nov-Apr)"), {11, 12, 1, 2, 3, 4})
+        self.assertIn("закрыта", osm.season_note({"highway": "track", "name": "Дорога",
+                                                  "motor_vehicle:conditional": "no @ (Nov-Apr)"}, 12))
+        self.assertIsNone(osm.season_note({"highway": "track", "motor_vehicle:conditional": "no @ (Nov-Apr)"}, 7))
+        self.assertIn("летом", osm.season_note({"highway": "track", "winter_road": "yes"}, 7))
+        self.assertIsNone(osm.season_note({"mountain_pass": "yes", "name": "П"}, 7))
+        self.assertIn("цепи", osm.season_note({"mountain_pass": "yes", "name": "П"}, 1))
+
+
 class GroupingTest(unittest.TestCase):
 
     def test_close_related_objects_become_one_stop(self):

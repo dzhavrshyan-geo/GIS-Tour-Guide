@@ -540,7 +540,8 @@ def surroundings_query(bbox, lon, lat, near_km=30):
 def surroundings(http, bbox, lon, lat):
     """Разбор общего ответа: {elements, settlements, protected, region, buildings}."""
     elements = overpass(http, surroundings_query(bbox, lon, lat))
-    result = {"elements": [], "settlements": [], "protected": [], "region": None, "buildings": None}
+    result = {"elements": [], "settlements": [], "protected": [], "region": None, "buildings": None,
+              "protected_hours": {}}
     near = []
     for element in elements:
         kind = element.get("type")
@@ -557,6 +558,8 @@ def surroundings(http, bbox, lon, lat):
                 item = (tag_name(tags), title)
                 if item not in result["protected"]:
                     result["protected"].append(item)
+                if tags.get("opening_hours"):
+                    result["protected_hours"][tag_name(tags)] = tags["opening_hours"]
         elif kind == "node" and tags.get("place") in ("city", "town", "village"):
             item = settlement(element, "near")
             if item:
@@ -687,3 +690,80 @@ def group_close(main, pois, mode="nature"):
             if target is not main:
                 target.popularity = max(target.popularity, poi.popularity)
     return leaders[0], leaders[1:]
+
+
+# --- Сезонные дороги, зимники, перевалы ---
+
+MONTH_ABBR = ["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"]
+
+
+def months_of(text):
+    """«no @ (Nov-Apr)», «Oct 15-May 15» → множество месяцев 1–12 (или пусто)."""
+    found = re.findall(r"\b(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)\w*", text.lower())
+    if len(found) < 2:
+        return {MONTH_ABBR.index(found[0]) + 1} if found else set()
+    a, b = MONTH_ABBR.index(found[0]), MONTH_ABBR.index(found[1])
+    span = range(a, b + 1) if a <= b else list(range(a, 12)) + list(range(0, b + 1))
+    return {m + 1 for m in span}
+
+
+def season_note(tags, month):
+    """Что сказать туристу про сезонную дорогу/перевал в этом месяце (или None)."""
+    name = tag_name(tags) or tags.get("ref") or "дорога без названия"
+    if tags.get("mountain_pass") == "yes":
+        if month in (10, 11, 12, 1, 2, 3, 4, 5):
+            ele = (" (%s м)" % tags["ele"]) if tags.get("ele") else ""
+            return "Перевал «%s»%s на пути — в холодный сезон бывает закрыт или нужны цепи; " \
+                   "проверьте сводки перед выездом." % (name, ele)
+        return None
+    if tags.get("winter_road") == "yes" or tags.get("ice_road") == "yes":
+        if month in (4, 5, 6, 7, 8, 9, 10, 11):
+            return "«%s» — зимник: летом и в распутицу непроезжий, ищите другой подъезд." % name
+        return "«%s» — зимник: проверьте, открыт ли он (ледовая обстановка)." % name
+    seasonal = tags.get("seasonal", "")
+    if seasonal:
+        if seasonal == "winter" and month in (4, 5, 6, 7, 8, 9, 10, 11):
+            return "«%s» проезжа только зимой." % name
+        if seasonal in ("summer", "dry_season", "yes") and month in (11, 12, 1, 2, 3, 4):
+            return "«%s» — сезонная дорога, зимой и весной может быть закрыта." % name
+        return None
+    for key, value in tags.items():
+        if key.endswith(":conditional") and value.lower().startswith("no"):
+            months = months_of(value)
+            if month in months:
+                return "«%s» закрыта для машин в это время года (%s)." % (name, value)
+    return None
+
+
+def near_line(point, coords, limit_m):
+    step = max(1, len(coords) // 400)
+    return any(geo.dist_m(point, c) <= limit_m for c in coords[::step] + coords[-1:])
+
+
+def access_issues(http, drive_coords, trailhead, month):
+    """Сезонные ограничения у дороги к объекту: [(текст)]."""
+    last = drive_coords[-400:] if drive_coords else []
+    box = geo.bbox_of(last + [trailhead], 3000)
+    route_box = geo.bbox_of(drive_coords + [trailhead], 1000) if drive_coords else box
+    query = "\n".join([
+        "[out:json][timeout:40];(",
+        'way["highway"]["seasonal"]["seasonal"!="no"]%s;' % bbox_filter(box),
+        'way["highway"]["winter_road"="yes"]%s;' % bbox_filter(box),
+        'way["highway"]["ice_road"="yes"]%s;' % bbox_filter(box),
+        'way["highway"][~"^(access|vehicle|motor_vehicle|motorcar):conditional$"~"^no"]%s;' % bbox_filter(box),
+        'node["mountain_pass"="yes"]%s;' % bbox_filter(route_box),
+        ");out center tags 300;"])
+    notes = []
+    for element in overpass(http, query):
+        tags = element.get("tags") or {}
+        point = element_point(element)
+        if not point:
+            continue
+        limit = 400 if tags.get("mountain_pass") == "yes" else 1500
+        if drive_coords and not near_line(point, drive_coords, limit) and \
+                geo.dist_m(point, trailhead) > 3000:
+            continue
+        note = season_note(tags, month)
+        if note and note not in notes:
+            notes.append(note)
+    return notes

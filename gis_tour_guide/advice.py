@@ -277,7 +277,7 @@ def build_urban(tour):
         tags = stop.tags or {}
         parts = []
         if tags.get("opening_hours"):
-            parts.append("часы работы: " + tags["opening_hours"])
+            parts.append("часы работы по OSM: " + tags["opening_hours"])
         if tags.get("fee") == "yes" or stop.category in ("museum", "gallery", "zoo", "theme_park"):
             parts.append("вход платный" if tags.get("fee") != "no" else "вход свободный")
         elif tags.get("fee") == "no":

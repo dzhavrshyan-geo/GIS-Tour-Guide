@@ -207,6 +207,16 @@ class NatureTest(unittest.TestCase):
         few = schedule.estimate(tour, [])
         self.assertLess(few["walk_km"], guess["walk_km"])
 
+    def test_season_and_access(self):
+        access = "\n".join(self.tour.access)
+        self.assertIn("Перевал «Вилючинский перевал» (820 м)", access)
+        self.assertNotIn("Далёкий", access)                    # не на нашей дороге
+        self.assertIn("«Зимник на Горелый» — зимник", access)
+        self.assertEqual(self.tour.closed_today,
+                         ["ООПТ «Южно-Камчатский природный парк» в эту дату закрыта для посещения (Jun-Sep)."])
+        self.assertIn(self.tour.closed_today[0], self.tour.warnings)
+        self.assertEqual(self.tour.advice[1][0], "Сезон и доступность")
+
     def test_route_variants(self):
         from gis_tour_guide import schedule
         half, day, two = schedule.variants(self.tour)
@@ -342,7 +352,20 @@ class UrbanTest(unittest.TestCase):
             self.assertIn(needle, text_)
         self.assertNotIn("медвед", text_)
         self.assertEqual([title for title, _ in self.tour.advice],
-                         ["План дня", "Что взять", "Билеты и время работы", "Где поесть", "Полезно знать"])
+                         ["План дня", "Сезон и доступность", "Что взять", "Билеты и время работы",
+                          "Где поесть", "Полезно знать"])
+        # 24.10.2026 — суббота: музей открыт
+        self.assertIn("Государственный исторический музей — в день поездки (сб) открыто, 10:00–18:00.",
+                      self.tour.access)
+
+    def test_closed_on_trip_date(self):
+        from fake_services import FakeHttp
+        from gis_tour_guide.planner import Planner, Settings
+        tour = Planner(FakeHttp(scenario="urban"), Settings(query="Кремль", half_km=2, max_points=5,
+                                                            date="2026-10-27")).run()   # вторник
+        closed = [w for w in tour.warnings if "ЗАКРЫТО" in w]
+        self.assertEqual(closed, ["Государственный исторический музей — в день поездки (вт, 27 октября) "
+                                  "ЗАКРЫТО по данным OpenStreetMap."])
 
     def test_outputs(self):
         _saved, group, added, layouts, _pictures, html, pdf = build_outputs(

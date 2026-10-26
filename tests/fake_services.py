@@ -306,12 +306,20 @@ class FakeHttp:
                 return {"elements": OVERPASS_POIS["elements"] + NEAR_VILLAGES + [
                     {"type": "area", "id": 1, "tags": {
                         "boundary": "protected_area", "name": "Южно-Камчатский природный парк",
-                        "protection_title": "природный парк"}},
+                        "protection_title": "природный парк", "opening_hours": "Jun-Sep"}},
                     {"type": "area", "id": 3600151233, "tags": {
                         "boundary": "administrative", "admin_level": "4", "name": "Камчатский край"}},
                     {"type": "count", "id": 0, "tags": {"ways": "0", "total": "0"}}]}
             if '"tourism"~"^(hotel' in query:
                 return {"elements": NATURE_LODGING}
+            if "mountain_pass" in query:
+                return {"elements": [
+                    {"type": "node", "id": 901, "lat": 52.70, "lon": 158.20,
+                     "tags": {"mountain_pass": "yes", "name": "Вилючинский перевал", "ele": "820"}},
+                    {"type": "node", "id": 902, "lat": 55.0, "lon": 160.0,
+                     "tags": {"mountain_pass": "yes", "name": "Далёкий перевал"}},
+                    {"type": "way", "id": 903, "center": {"lat": 52.586, "lon": 158.080},
+                     "tags": {"highway": "track", "winter_road": "yes", "name": "Зимник на Горелый"}}]}
             if "is_in" in query:
                 return {"elements": [{"type": "area", "id": 1, "tags": {
                     "boundary": "protected_area", "name": "Южно-Камчатский природный парк",

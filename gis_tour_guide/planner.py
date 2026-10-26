@@ -13,10 +13,10 @@ import datetime
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 
-from . import advice, extras, geo, geocode, osm, routing, schedule, terrain, tsp, wiki
+from . import advice, extras, geo, geocode, hours, osm, routing, schedule, terrain, tsp, wiki
 from .model import DriveRoute, Leg, Poi, Tour
 from .net import Cancelled, NetError
-from .text import norm_name
+from .text import fmt_km, norm_name
 
 # В автоматический выбор не берём «служебные» места — только достопримечательности
 NOT_AUTO = ("camp", "picnic", "hut")
@@ -43,6 +43,7 @@ PLAN_STAGES = [
     ("photos", "Фотографии с Викисклада", 4),
     ("nature", "Животные и растения рядом", 2),
     ("lodging", "Ночлег поблизости", 2),
+    ("access", "Сезон и доступность", 1),
     ("advice", "Советы: одежда, еда, безопасность", 1),
 ]
 
@@ -174,6 +175,7 @@ class Planner:
             len(candidates), len(grouped)))
         self.stage("popular", 1)
         tour.protected = [] if tour.urban else around.get("protected") or []
+        tour.protected_hours = {} if tour.urban else around.get("protected_hours") or {}
         tour.failed_sources = [f for f in self.failed if f in ("OpenStreetMap", "Статьи Википедии")]
         self.choose(tour)
         return tour
@@ -277,7 +279,8 @@ class Planner:
                 ("weather", self.job_weather if self.s.weather else None),
                 ("photos", self.job_photos if self.s.photos else None),
                 ("nature", self.job_nature if self.s.nature and not tour.urban else None),
-                ("lodging", self.job_lodging if tour.overnight else None)]
+                ("lodging", self.job_lodging if tour.overnight else None),
+                ("access", self.job_access)]
         with ThreadPoolExecutor(len(jobs)) as pool:
             futures = []
             for key, job in jobs:
@@ -290,6 +293,9 @@ class Planner:
 
         self.stage("advice")
         advice.build(tour)
+        if tour.access or tour.closed_today:
+            tour.advice.insert(1, ("Сезон и доступность", tour.closed_today + tour.access))
+            tour.warnings += tour.closed_today + [a for a in tour.access if "закрыт" in a.lower()]
         limit = LONG_WALK_M[tour.mode]
         if tour.totals.get("walk_m", 0) > limit:
             tour.warnings.append("Пеший маршрут длиннее %d км — снимите галочки с части объектов "
@@ -508,6 +514,32 @@ class Planner:
         tour.lodging = self.soft("Ночлег", osm.lodging, self.http, point[0], point[1]) or []
         if tour.lodging:
             tour.add_source("Ночлег — OpenStreetMap (класс по типу и звёздам, цены уточняйте)")
+
+    def job_access(self, tour):
+        """Часы работы в день поездки, сезон ООПТ, зимники и перевалы на подъезде."""
+        date = datetime.date.fromisoformat(tour.date)
+        tour.closed_today, tour.access = [], []
+        for stop in tour.stops[1:]:
+            value = (stop.tags or {}).get("opening_hours")
+            state, _ = hours.status(value, date)
+            if state == "closed":
+                tour.closed_today.append(hours.describe(stop.name, value, date))
+            elif state == "open" and tour.urban:
+                tour.access.append(hours.describe(stop.name, value, date))
+        for name, value in tour.protected_hours.items():
+            state, times = hours.status(value, date)
+            if state == "closed":
+                tour.closed_today.append("ООПТ «%s» в эту дату закрыта для посещения (%s)." % (name, value))
+            elif state == "open" and times:
+                tour.access.append("ООПТ «%s» открыта для посещения: %s." % (name, times.replace("-", "–")))
+        if not tour.urban and tour.drive and tour.drive.ok:
+            notes = self.soft("Сезонные дороги", osm.access_issues, self.http, tour.drive.coords,
+                              tour.stops[0].point, date.month) or []
+            tour.access += notes
+        if not tour.urban and date.month in (11, 12, 1, 2, 3, 4) and tour.drive and tour.drive.ok and \
+                tour.drive.roads and "без названия" in tour.drive.roads[-1][0]:
+            tour.access.append("Последние %s — местные дороги: зимой и в распутицу их часто не чистят, "
+                               "уточните проезд у местных." % fmt_km(tour.drive.roads[-1][1]))
 
     def job_nature(self, tour):
         tour.observations = self.soft("iNaturalist", extras.species, self.http, tour.bbox,

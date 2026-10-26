@@ -174,6 +174,9 @@ class Tour:
     weather: list = field(default_factory=list)      # [{label, elevation, days:[...]}]
     services: dict = field(default_factory=dict)
     protected: list = field(default_factory=list)    # [(название, класс)]
+    protected_hours: dict = field(default_factory=dict)  # {ООПТ: opening_hours}
+    access: list = field(default_factory=list)       # сезон и доступность: [текст]
+    closed_today: list = field(default_factory=list)  # что закрыто в день поездки
     wikivoyage: dict = field(default_factory=dict)   # {title, url, sections: {..}}
     photos: list = field(default_factory=list)
     observations: list = field(default_factory=list)
