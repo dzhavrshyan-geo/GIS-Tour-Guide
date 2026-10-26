@@ -101,12 +101,13 @@ def drive(http, start, start_name, dest):
     return result
 
 
-def foot_segments(http, a, b, offtrail_path=None, prefer_trails=1.3):
+def foot_segments(http, a, b, offtrail_path=None, prefer_trails=1.3, trails=None):
     """Сегменты пешего перехода a→b.
 
     По дорогам и тропам (OSRM, пешеходный профиль), а концы, лежащие в стороне
     от троп, и переходы, где тропа сильно петляет, — по рельефу: offtrail_path(a, b)
-    возвращает (список точек, часы) или None.
+    возвращает (список точек, часы) или None. trails — сеть маркированных троп
+    (trails.TrailNetwork): если по ней путь не намного длиннее, идём по ней.
     """
     direct = geo.dist_m(a, b)
     trail = None
@@ -124,6 +125,17 @@ def foot_segments(http, a, b, offtrail_path=None, prefer_trails=1.3):
                 return [Segment("offtrail", found[0], geo.line_length_m(found[0]))]
         return [Segment("offtrail", [p, q], geo.dist_m(p, q))]
 
+    marked = trails.path(a, b) if trails else None
+    if marked:
+        coords, length, snap_a, snap_b, names = marked
+        marked_walk = length + 2.0 * (snap_a + snap_b)
+        other = None
+        if trail:
+            route = trail["routes"][0]
+            waypoints = trail.get("waypoints") or [{}, {}]
+            other = route.get("distance", 0) + 2.0 * sum((w.get("distance", 0) or 0) for w in waypoints)
+        if other is None or marked_walk <= other * 1.25:
+            return around(a, b, coords, snap_a, snap_b, offtrail, "marked", ", ".join(names))
     if not trail:
         return offtrail(a, b)
     route = trail["routes"][0]
@@ -150,3 +162,19 @@ def foot_segments(http, a, b, offtrail_path=None, prefer_trails=1.3):
         coords.append(b)
     segments.append(Segment("trail", coords, geo.line_length_m(coords)))
     return segments + tail
+
+
+def around(a, b, coords, snap_a, snap_b, offtrail, kind, name=""):
+    """Сегменты: подход к линии (по рельефу, если далеко), сама линия, отход от неё."""
+    coords = list(coords)
+    segments = []
+    if snap_a > SNAP_LIMIT_M:
+        segments += offtrail(a, coords[0])
+    elif geo.dist_m(a, coords[0]) > 1:
+        coords.insert(0, a)
+    tail = []
+    if snap_b > SNAP_LIMIT_M:
+        tail = offtrail(coords[-1], b)
+    elif geo.dist_m(coords[-1], b) > 1:
+        coords.append(b)
+    return segments + [Segment(kind, coords, geo.line_length_m(coords), name)] + tail

@@ -133,9 +133,13 @@ def build_layers(tour):
             if len(segment.coords) > 1:
                 walk.append((line(segment.coords), {
                     "leg": number, "kind": segment.kind, "from_stop": a.name, "to_stop": b.name,
-                    "length_m": round(segment.length_m)}))
+                    "length_m": round(segment.length_m), "trail": segment.name}))
     layers["walk"] = memory_layer("LineString", "Пеший маршрут", [
-        ("leg", int), ("kind", str), ("from_stop", str), ("to_stop", str), ("length_m", int)], walk)
+        ("leg", int), ("kind", str), ("from_stop", str), ("to_stop", str), ("length_m", int),
+        ("trail", str)], walk)
+    if tour.marked_trails:
+        layers["trails"] = memory_layer("LineString", "Маркированные тропы", [("name", str)], [
+            (line(w["coords"]), {"name": w.get("name", "")}) for w in tour.marked_trails])
 
     drive = tour.drive
     if drive and drive.ok and len(drive.coords) > 1:
@@ -357,11 +361,24 @@ def style_walk(layer, urban=False):
         categories.append(QgsRendererCategory(
             "trail", add_arrows(casing_line(brand.ROUTE, 1.0), brand.ROUTE),
             "по улицам" if urban else "по дорогам и тропам"))
+    if "marked" in kinds:
+        marked = casing_line(brand.ROUTE, 1.2)
+        marked.appendSymbolLayer(QgsSimpleLineSymbolLayer.create({
+            "line_color": "white", "line_width": "0.3", "use_custom_dash": "1", "customdash": "1.5;1.5",
+            "customdash_unit": "MM"}))
+        categories.append(QgsRendererCategory("marked", add_arrows(marked, brand.ROUTE),
+                                              "по маркированной тропе"))
     if "offtrail" in kinds:
         categories.append(QgsRendererCategory(
             "offtrail", add_arrows(casing_line(brand.ROUTE, 0.9, dash="2.6;1.6"), brand.ROUTE),
             "без троп, по рельефу"))
     layer.setRenderer(QgsCategorizedSymbolRenderer("kind", categories))
+
+
+def style_trails(layer):
+    layer.renderer().setSymbol(QgsLineSymbol.createSimple({
+        "line_color": "#a2392f", "line_width": "0.45", "use_custom_dash": "1", "customdash": "2;1.2",
+        "customdash_unit": "MM", "capstyle": "round"}))
 
 
 def style_drive(layer):
@@ -463,7 +480,7 @@ def style_dem(layer, kind):
 
 
 VECTOR_ORDER = ["stops", "photos", "object", "lodging", "others", "settlements", "town", "walk",
-                "drive", "region"]
+                "trails", "drive", "region"]
 
 
 def basemap_layer(key):
@@ -493,6 +510,7 @@ def add_to_project(tour, layers, basemap="topo", project=None):
     styles = {"stops": style_stops, "object": style_object, "others": style_others,
               "walk": lambda layer: style_walk(layer, tour.urban), "drive": style_drive,
               "town": style_town, "settlements": style_settlements, "lodging": style_lodging,
+              "trails": style_trails,
               "region": style_region, "photos": style_photos}
     added = {}
     for key in VECTOR_ORDER:
@@ -924,7 +942,7 @@ def make_layouts(tour, added, basemap="topo", project=None):
 
     # 2. Карта-схема маршрута
     layout = new_layout(project, "Экскурсия «%s» — 2. Карта-схема маршрута" % name)
-    keys = ["stops", "others", "walk"]
+    keys = ["stops", "others", "walk", "trails"]
     layers = [added[k] for k in keys if k in added] + relief + scheme_base
     t = tour.totals
     sub = "%s · %s, %s, ~%s пешком" % (mode, "кольцевой" if tour.loop else "в одну сторону",

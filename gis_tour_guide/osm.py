@@ -824,3 +824,25 @@ def water_features(http, bbox):
                     if len(coords) > 3 and coords[0] == coords[-1]:
                         polygons.append((kind, coords))
     return {"polygons": polygons, "lines": lines}
+
+
+# --- Маркированные туристские тропы ---
+
+def hiking_trails(http, bbox):
+    """Пути маршрутов route=hiking в прямоугольнике: [{id, name, nodes, coords}]."""
+    query = ('[out:json][timeout:60];relation["route"~"^(hiking|foot)$"]%s->.r;'
+             '.r out body;way(r.r);out geom;') % bbox_filter(bbox)
+    names, ways = {}, []
+    for element in overpass(http, query, ttl=30 * 86400):
+        if element.get("type") == "relation":
+            name = tag_name(element.get("tags") or {}) or (element.get("tags") or {}).get("ref", "")
+            for member in element.get("members") or []:
+                if member.get("type") == "way" and name:
+                    names.setdefault(member.get("ref"), name)
+        elif element.get("type") == "way" and element.get("nodes") and element.get("geometry"):
+            coords = [(p["lon"], p["lat"]) for p in element["geometry"]]
+            if len(coords) == len(element["nodes"]) and len(coords) > 1:
+                ways.append({"id": element["id"], "nodes": element["nodes"], "coords": coords})
+    for way in ways:
+        way["name"] = names.get(way["id"], "")
+    return ways

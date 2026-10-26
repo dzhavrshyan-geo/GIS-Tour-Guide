@@ -203,6 +203,61 @@ def gpx_text(tour):
     return "\n".join(lines)
 
 
+def kml_color(hex_color, alpha="ff"):
+    """#rrggbb → aabbggrr (так цвета хранит KML)."""
+    value = hex_color.lstrip("#")
+    return alpha + value[4:6] + value[2:4] + value[0:2]
+
+
+def kml_text(tour):
+    """Точки, маршрут и ночлег в KML — открывается в Organic Maps, Maps.me, Google Earth."""
+    def placemark(name, description, style, lon, lat):
+        return ("<Placemark><name>%s</name><description>%s</description><styleUrl>#%s</styleUrl>"
+                "<Point><coordinates>%.6f,%.6f</coordinates></Point></Placemark>" % (
+                    esc(name), esc(description), style, lon, lat))
+
+    def path(name, style, coords):
+        return ("<Placemark><name>%s</name><styleUrl>#%s</styleUrl><LineString><tessellate>1</tessellate>"
+                "<coordinates>%s</coordinates></LineString></Placemark>" % (
+                    esc(name), style, " ".join("%.6f,%.6f" % (c[0], c[1]) for c in coords)))
+
+    styles = {"main": (brand.PIN, "icon"), "stop": (brand.GREEN, "icon"), "start": (brand.SLATE, "icon"),
+              "lodging": ("#8e5a1e", "icon"), "trail": (brand.ROUTE, "line"), "marked": (brand.ROUTE, "line"),
+              "offtrail": ("#8e44ad", "line"), "drive": (brand.DRIVE, "line")}
+    out = ['<?xml version="1.0" encoding="UTF-8"?>', '<kml xmlns="http://www.opengis.net/kml/2.2"><Document>',
+           "<name>%s</name>" % esc("Экскурсия: " + tour.place.name)]
+    for key, (color, kind) in styles.items():
+        if kind == "icon":
+            out.append('<Style id="%s"><IconStyle><color>%s</color></IconStyle></Style>' % (key, kml_color(color)))
+        else:
+            out.append('<Style id="%s"><LineStyle><color>%s</color><width>4</width></LineStyle></Style>' % (
+                key, kml_color(color)))
+    out.append("<Folder><name>Точки маршрута</name>")
+    for poi in tour.stops:
+        style = "start" if poi.order == 0 else "main" if poi.is_main else "stop"
+        name = poi.name if poi.order == 0 else "%d. %s" % (poi.order, poi.name)
+        out.append(placemark(name, clip(poi.extract or poi.description or poi.kind, 400), style, poi.lon, poi.lat))
+        for member in poi.members:
+            out.append(placemark("%d. %s" % (poi.order, member.name), member.kind, "stop", member.lon, member.lat))
+    out.append("</Folder><Folder><name>Пеший маршрут</name>")
+    for number, leg in enumerate(tour.legs, 1):
+        for segment in leg.segments:
+            if len(segment.coords) > 1:
+                out.append(path("Участок %d%s" % (number, " — " + segment.name if segment.name else ""),
+                                segment.kind if segment.kind in styles else "trail", segment.coords))
+    out.append("</Folder>")
+    if tour.drive and tour.drive.ok:
+        out.append(path("Дорога от " + tour.drive.start_name, "drive", tour.drive.coords))
+    if tour.lodging:
+        out.append("<Folder><name>Ночлег</name>")
+        for item in tour.lodging:
+            out.append(placemark(item["name"], "%s · %s" % (item["label"], item["kind"]), "lodging",
+                                 item["lon"], item["lat"]))
+        out.append("</Folder>")
+    out.append("</Document></kml>")
+    return "\n".join(out)
+
+
 def nice_step(value):
     for step in (10, 20, 25, 50, 100, 200, 250, 500, 1000):
         if value <= step:
@@ -503,7 +558,12 @@ def route(b):
     for leg in tour.legs:
         x, y = tour.stops[leg.a], tour.stops[leg.b]
         how = []
-        trail = leg.length_m - leg.offtrail_m
+        marked = [s for s in leg.segments if s.kind == "marked"]
+        marked_m = sum(s.length_m for s in marked)
+        trail = leg.length_m - leg.offtrail_m - marked_m
+        if marked_m > 30:
+            names = ", ".join(sorted({s.name for s in marked if s.name}))
+            how.append("по маркированной тропе%s %s" % (" «%s»" % names if names else "", fmt_km(marked_m)))
         if trail > 30:
             how.append(("по улицам %s" if tour.urban else "по дорогам и тропам %s") % fmt_km(trail))
         if leg.offtrail_m > 30:

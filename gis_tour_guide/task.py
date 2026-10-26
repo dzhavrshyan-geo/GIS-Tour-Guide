@@ -85,7 +85,8 @@ class TourTask(BaseTask):
         super().__init__("ГИС-экскурсовод: %s" % tour.place.name, cache_dir)
         self.tour = tour
         self.settings = settings
-        self.gpx = ""            # трек GPX — в памяти, на диск только по кнопке «Скачать»
+        self.gpx = ""            # трек GPX и KML — в памяти, на диск только по кнопке «Скачать»
+        self.kml = ""
         self.elevation = elevation
         self.use_terrain_tiles = use_terrain_tiles
         self.photos_dir = photos_dir
@@ -111,6 +112,7 @@ class TourTask(BaseTask):
             self.stage("relief", 1)
         tour.profile_png = report.draw_profile(tour)
         self.gpx = report.gpx_text(tour)
+        self.kml = report.kml_text(tour)
 
     def make_dem(self, tour, elevation):
         coords = [c for leg in tour.legs for s in leg.segments for c in s.coords]

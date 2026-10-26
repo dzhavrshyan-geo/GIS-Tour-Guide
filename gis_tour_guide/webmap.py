@@ -49,7 +49,7 @@ function gtMap(id, d) {
   var map = L.map(id, {zoomSnap: 0.5, attributionControl: true});
   // сначала охват — Leaflet рисует линии только на карте с заданным видом
   var all = [];
-  (d.lines || []).forEach(function (l) { if (d.fitLines) { all = all.concat(l.coords); } });
+  (d.lines || []).forEach(function (l) { if (d.fitLines && !l.nofit) { all = all.concat(l.coords); } });
   (d.points || []).forEach(function (p) { if (p.fit !== false) { all.push([p.lat, p.lon]); } });
   var bounds = L.latLngBounds(all.length ? all : [[d.box[1], d.box[0]], [d.box[3], d.box[2]]]);
   map.fitBounds(bounds, {padding: [24, 24]});
@@ -72,10 +72,18 @@ function gtMap(id, d) {
     L.geoJSON(g, {style: {color: d.c.green_dark, weight: 2, fill: true, fillColor: '#fff', fillOpacity: 0.15}}).addTo(map);
   });
   (d.lines || []).forEach(function (l) {
+    if (l.kind === 'trails') {
+      L.polyline(l.coords, {color: '#a2392f', weight: 2, dashArray: '6 4', opacity: 0.8})
+        .bindTooltip(l.title || '', {sticky: true}).addTo(map);
+      return;
+    }
     var color = l.kind === 'drive' ? d.c.drive : d.c.route;
     L.polyline(l.coords, {color: '#fff', weight: 8, opacity: 0.9}).addTo(map);
     L.polyline(l.coords, {color: color, weight: 4, dashArray: l.kind === 'offtrail' ? '8 7' : null})
       .bindTooltip(l.title || '', {sticky: true}).addTo(map);
+    if (l.kind === 'marked') {
+      L.polyline(l.coords, {color: '#fff', weight: 1.5, dashArray: '5 5'}).addTo(map);
+    }
   });
   (d.points || []).forEach(function (p) {
     var icon = p.style === 'dot' ? dot(p.color) : pin(p.cls || '', p.color, p.text);
@@ -123,6 +131,9 @@ LEGEND = {
              "box-shadow:0 0 2px #0006" % brand.PIN, "главный объект"),
     "trail": ("width:26px;height:4px;background:%s" % brand.ROUTE, "по тропам и улицам"),
     "offtrail": ("width:26px;height:0;border-top:4px dashed %s" % brand.ROUTE, "без троп, по рельефу"),
+    "marked": ("width:26px;height:4px;background:repeating-linear-gradient(90deg,%s 0 6px,#fff 6px 9px)"
+               % brand.ROUTE, "по маркированной тропе"),
+    "trails": ("width:26px;height:0;border-top:2px dashed #a2392f", "маркированные тропы рядом"),
     "photo": ("width:16px;height:16px;border-radius:50%%;background:%s;border:2px solid #fff;"
               "box-shadow:0 0 2px #0006" % brand.PHOTO, "место съёмки, номер фото"),
     "drive": ("width:26px;height:4px;background:%s" % brand.DRIVE, "дорога на машине"),
@@ -144,8 +155,10 @@ def route_lines(tour):
         a, b = tour.stops[leg.a], tour.stops[leg.b]
         for segment in leg.segments:
             if len(segment.coords) > 1:
-                lines.append({"kind": segment.kind, "coords": latlon(segment.coords),
-                              "title": "Участок %d: %s → %s" % (number, a.name, b.name)})
+                title = "Участок %d: %s → %s" % (number, a.name, b.name)
+                if segment.name:
+                    title += " · тропа «%s»" % segment.name
+                lines.append({"kind": segment.kind, "coords": latlon(segment.coords), "title": title})
     return lines
 
 
@@ -167,8 +180,12 @@ def stop_points(tour, small=False):
 
 def scheme_data(tour, basemap):
     kinds = {s.kind for leg in tour.legs for s in leg.segments}
-    legend = [LEGEND["main"], LEGEND["stop"], LEGEND["trail"]] + ([LEGEND["offtrail"]] if "offtrail" in kinds else [])
-    return {"lines": route_lines(tour), "points": stop_points(tour), "legend": legend, "fitLines": True}
+    legend = [LEGEND["main"], LEGEND["stop"]] + [LEGEND[k] for k in ("trail", "marked", "offtrail") if k in kinds]
+    lines = [{"kind": "trails", "coords": latlon(w["coords"]), "title": w.get("name") or "маркированная тропа",
+              "nofit": True} for w in tour.marked_trails]
+    if lines:
+        legend.append(LEGEND["trails"])
+    return {"lines": lines + route_lines(tour), "points": stop_points(tour), "legend": legend, "fitLines": True}
 
 
 def photos_data(tour, basemap):

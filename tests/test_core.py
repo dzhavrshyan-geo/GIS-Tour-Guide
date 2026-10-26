@@ -253,6 +253,33 @@ class SeasonTest(unittest.TestCase):
         self.assertIn("цепи", osm.season_note({"mountain_pass": "yes", "name": "П"}, 1))
 
 
+class TrailsTest(unittest.TestCase):
+
+    def network(self):
+        from gis_tour_guide.trails import TrailNetwork
+        return TrailNetwork([{"nodes": [1, 2, 3], "coords": [(158.0, 52.0), (158.01, 52.002), (158.02, 52.0)],
+                              "name": "Тропа"}])
+
+    def test_path_on_network(self):
+        coords, length, snap_a, snap_b, names = self.network().path((158.0, 52.0005), (158.02, 52.0))
+        self.assertEqual(coords[0], (158.0, 52.0))
+        self.assertEqual(names, ["Тропа"])
+        self.assertAlmostEqual(length, geo.line_length_m(coords))
+        self.assertIsNone(self.network().path((158.0, 52.1), (158.02, 52.0)))   # далеко от тропы
+
+    def test_foot_segments_prefer_marked_trail(self):
+        a, b = (158.0, 52.0), (158.02, 52.0)
+        http = FakeFootHttp({"code": "Ok", "routes": [{"distance": 1500, "geometry": {
+            "coordinates": [list(a), list(b)]}}], "waypoints": [{"distance": 5}, {"distance": 5}]})
+        segments = routing.foot_segments(http, a, b, None, trails=self.network())
+        self.assertEqual([s.kind for s in segments], ["marked"])
+        self.assertEqual(segments[0].name, "Тропа")
+        # обычная дорога вдвое короче — по маркированной тропе не идём
+        http.route["routes"][0]["distance"] = 700
+        self.assertEqual([s.kind for s in routing.foot_segments(http, a, b, None, trails=self.network())],
+                         ["trail"])
+
+
 class GroupingTest(unittest.TestCase):
 
     def test_close_related_objects_become_one_stop(self):

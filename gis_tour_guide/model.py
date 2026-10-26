@@ -114,9 +114,10 @@ class Settlement:
 
 @dataclass
 class Segment:
-    kind: str                   # trail — по дорогам и тропам, offtrail — по рельефу
+    kind: str                   # trail — по дорогам и тропам, marked — по маркированной тропе, offtrail — по рельефу
     coords: list
     length_m: float = 0.0
+    name: str = ""              # название маркированной тропы
 
 
 @dataclass
@@ -190,6 +191,7 @@ class Tour:
     day_hours: float = 0.0                           # дорога туда-обратно + маршрут + осмотр
     daylight: float = 0.0
     lodging: list = field(default_factory=list)      # 3 варианта ночлега по ценовым сегментам
+    marked_trails: list = field(default_factory=list)  # участки маркированных троп рядом
     dem_name: str = ""
     date: str = ""                                   # YYYY-MM-DD
     people: int = 2

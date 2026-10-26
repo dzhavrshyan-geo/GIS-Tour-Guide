@@ -64,6 +64,7 @@ class TourGuideDialog(QDialog):
         self.folder = ""
         self.layouts = {}
         self.gpx = ""                # трек хранится в памяти, пока открыто окно
+        self.kml = ""
         self.gpx_name = "tour.gpx"
         self.settings = QgsSettings()
         self.progress = ProgressDialog(self)
@@ -253,9 +254,10 @@ class TourGuideDialog(QDialog):
         row = QHBoxLayout()
         self.pdf_button = QPushButton("Открыть PDF")
         self.pdf_button.clicked.connect(lambda: self.open_file("report.pdf"))
-        self.gpx_button = QPushButton("Скачать GPX…")
+        self.gpx_button = QPushButton("Скачать трек…")
         self.gpx_button.setObjectName("Accent")
-        self.gpx_button.setToolTip("Трек и точки для навигатора. Хранится, пока открыто окно плагина.")
+        self.gpx_button.setToolTip("Трек и точки для навигатора: GPX или KML (Organic Maps, Maps.me). "
+                                   "Хранится в памяти, пока открыто окно плагина.")
         self.gpx_button.clicked.connect(self.save_gpx)
         folder = QPushButton("Папка")
         folder.clicked.connect(lambda: self.open_file(""))
@@ -660,6 +662,7 @@ class TourGuideDialog(QDialog):
         self.folder = folder
         # трек готов сразу после маршрута — кнопка работает, даже если карты или отчёт не получатся
         self.gpx = task.gpx
+        self.kml = task.kml
         self.gpx_name = "%s.gpx" % slug(tour.place.name)
         self.gpx_button.setEnabled(bool(self.gpx))
         progress = self.progress
@@ -742,19 +745,22 @@ class TourGuideDialog(QDialog):
             self.log("Трека нет — создайте экскурсию заново.")
             return
         default = os.path.join(self.folder or os.path.expanduser("~"), self.gpx_name)
-        path, _ = QFileDialog.getSaveFileName(self, "Сохранить трек GPX", default, "GPX (*.gpx)")
+        filters = "GPX — навигаторы, OsmAnd (*.gpx);;KML — Organic Maps, Maps.me, Google Earth (*.kml)"
+        path, chosen = QFileDialog.getSaveFileName(self, "Сохранить трек", default, filters)
         if not path:
             return
-        if not path.lower().endswith(".gpx"):
-            path += ".gpx"
+        kml = path.lower().endswith(".kml") or (chosen.startswith("KML") and not path.lower().endswith(".gpx"))
+        extension = ".kml" if kml else ".gpx"
+        if not path.lower().endswith(extension):
+            path = os.path.splitext(path)[0] + extension
         try:
             with open(path, "w", encoding="utf-8") as handle:
-                handle.write(self.gpx)
+                handle.write(self.kml if kml else self.gpx)
         except OSError as error:
-            QMessageBox.warning(self, brand.NAME, "Не удалось сохранить GPX:\n%s" % error)
+            QMessageBox.warning(self, brand.NAME, "Не удалось сохранить трек:\n%s" % error)
             return
-        self.log("GPX сохранён: %s" % path)
-        self.status.setText("✓ GPX сохранён: %s" % path)
+        self.log("Трек сохранён: %s" % path)
+        self.status.setText("✓ Трек сохранён: %s" % path)
 
     def open_layout(self, key):
         name = self.layouts.get(key)
@@ -764,7 +770,7 @@ class TourGuideDialog(QDialog):
 
     def cleanup_temp(self):
         """Окно закрыли — трек из памяти забываем."""
-        self.gpx = ""
+        self.gpx = self.kml = ""
         if hasattr(self, "gpx_button"):
             self.gpx_button.setEnabled(False)
 

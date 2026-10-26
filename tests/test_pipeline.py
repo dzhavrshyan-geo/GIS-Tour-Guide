@@ -169,6 +169,24 @@ class NatureTest(unittest.TestCase):
         inside = terrain.inside(np.array([p[0] for p in dense]), np.array([p[1] for p in dense]), LAKE)
         self.assertFalse(inside.any())
 
+    def test_marked_trail_used(self):
+        marked = [s for leg in self.tour.legs for s in leg.segments if s.kind == "marked"]
+        self.assertEqual({s.name for s in marked}, {"Тропа к водопаду"})
+        self.assertEqual(len(self.tour.marked_trails), 2)
+
+    def test_kml_export(self):
+        import xml.etree.ElementTree as ET
+        from gis_tour_guide import report
+        root = ET.fromstring(report.kml_text(self.tour))
+        ns = {"k": "http://www.opengis.net/kml/2.2"}
+        names = [n.text for n in root.iter("{http://www.opengis.net/kml/2.2}name")]
+        self.assertIn("6. Вилючинский водопад", names)
+        main = next(p for p in self.tour.stops if p.is_main)
+        self.assertIn("%d. Кратер Активный" % main.order, names)   # соседи остановки — тоже точками
+        lines = root.findall(".//k:LineString", ns)
+        self.assertGreater(len(lines), 5)
+        self.assertTrue(any("Тропа к водопаду" in (n or "") for n in names))
+
     def test_photos_numbered_in_route_order(self):
         tour = self.tour
         self.assertEqual([p.number for p in tour.photos], list(range(1, len(tour.photos) + 1)))
@@ -268,7 +286,7 @@ class NatureTest(unittest.TestCase):
         self.assertTrue(all(len(data) > 5000 for data in pictures.values()))
         self.assertEqual(added["settlements"].featureCount(), len(self.tour.settlements))
         self.assertEqual(sorted(c.value() for c in added["walk"].renderer().categories()),
-                         ["offtrail", "trail"])
+                         ["marked", "offtrail", "trail"])
         self.assertNotIn("zone", added)                       # зону поиска на карты не выносим
         self.assertEqual(added["lodging"].featureCount(), 3)
         self.assertEqual(added["photos"].renderer().type(), "pointDisplacement")
@@ -288,6 +306,9 @@ class NatureTest(unittest.TestCase):
         self.assertIn("id='photo-1'", html)
         self.assertIn("Ночлег и план по дням", html)
         self.assertIn("Рядом, в той же остановке: <b>Кратер Активный</b>", html)
+        self.assertIn("по маркированной тропе «Тропа к водопаду»", html)
+        self.assertIn("trails", added)
+        self.assertIn("marked", [c.value() for c in added["walk"].renderer().categories()])
         self.assertIn("Паратунка Резорт", html)
         self.assertGreater(os.path.getsize(pdf), 50000)
         with open(pdf, "rb") as handle:
@@ -407,7 +428,8 @@ class OfflineServicesTest(unittest.TestCase):
         self.assertFalse(tour.drive.ok)
         self.assertIn("недоступен", tour.drive.note)
         self.assertEqual(len(tour.stops), 5)
-        self.assertTrue(all(s.kind == "offtrail" for leg in tour.legs for s in leg.segments))
+        # без маршрутизатора — по рельефу или по маркированным тропам из OSM
+        self.assertTrue({s.kind for leg in tour.legs for s in leg.segments} <= {"offtrail", "marked"})
         self.assertTrue(any(line.startswith("⚠ Статьи Википедии") for line in log))
         self.assertTrue(tour.advice)
 
@@ -516,6 +538,14 @@ class DialogTest(unittest.TestCase):
                 QFileDialog.getSaveFileName = original_dialog
             with open(target, encoding="utf-8") as handle:
                 self.assertEqual(handle.read(), work.gpx)
+            kml = os.path.join(folder, "saved")
+            QFileDialog.getSaveFileName = staticmethod(lambda *a, **k: (kml, "KML — Organic Maps (*.kml)"))
+            try:
+                dialog.save_gpx()
+            finally:
+                QFileDialog.getSaveFileName = original_dialog
+            with open(kml + ".kml", encoding="utf-8") as handle:
+                self.assertIn("<kml", handle.read())
             dialog.close()                                    # закрыли окно — трек забыт
             self.assertEqual(dialog.gpx, "")
             self.assertFalse(dialog.gpx_button.isEnabled())

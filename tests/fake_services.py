@@ -156,6 +156,15 @@ LAKE[-1] = LAKE[0]
 WATER = [{"type": "way", "id": 990, "tags": {"natural": "water", "name": "Озерцо"},
           "geometry": [{"lon": x, "lat": y} for x, y in LAKE]}]
 
+# Маркированная тропа от Вилючинского водопада к началу маршрута (концу дороги)
+TRAIL_POINTS = [(158.120, 52.600), (158.105, 52.597), (158.090, 52.592), (158.080, 52.588), (158.0755, 52.5852)]
+TRAILS = [
+    {"type": "relation", "id": 5000, "tags": {"route": "hiking", "name": "Тропа к водопаду"},
+     "members": [{"type": "way", "ref": 5001, "role": ""}, {"type": "way", "ref": 5002, "role": ""}]},
+    {"type": "way", "id": 5001, "nodes": [1, 2, 3], "geometry": [{"lon": x, "lat": y} for x, y in TRAIL_POINTS[:3]]},
+    {"type": "way", "id": 5002, "nodes": [3, 4, 5], "geometry": [{"lon": x, "lat": y} for x, y in TRAIL_POINTS[2:]]},
+]
+
 NEAR_VILLAGES = [
     {"type": "node", "id": 54, "lat": 52.83, "lon": 158.18, "tags": {"place": "village", "name": "Термальный"}},
     {"type": "node", "id": 55, "lat": 52.91, "lon": 158.22, "tags": {"place": "village", "name": "Паратунка"}},
@@ -320,6 +329,8 @@ class FakeHttp:
                     {"type": "count", "id": 0, "tags": {"ways": "0", "total": "0"}}]}
             if '"tourism"~"^(hotel' in query:
                 return {"elements": NATURE_LODGING}
+            if 'route"~"^(hiking|foot)$"' in query:
+                return {"elements": TRAILS}
             if "out geom" in query:
                 return {"elements": WATER}
             if "mountain_pass" in query:

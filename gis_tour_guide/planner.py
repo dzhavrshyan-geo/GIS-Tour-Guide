@@ -13,7 +13,7 @@ import datetime
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 
-from . import advice, extras, geo, geocode, hours, osm, routing, schedule, terrain, tsp, wiki
+from . import advice, extras, geo, geocode, hours, osm, routing, schedule, terrain, trails, tsp, wiki
 from .model import DriveRoute, Leg, Poi, Tour
 from .net import Cancelled, NetError
 from .text import fmt_km, norm_name
@@ -401,6 +401,14 @@ class Planner:
                 self.log("Вода и болота для пути по рельефу: %d контуров, %d рек" % (
                     len(water["polygons"]), len(water["lines"])))
         finder = terrain.offtrail_finder(elevation, water=water)
+        network = None
+        if not tour.urban:
+            points = [s.point for s in tour.stops]
+            ways = self.soft("Маркированные тропы", osm.hiking_trails, self.http, geo.bbox_of(points, 2000))
+            network = trails.TrailNetwork(ways or [])
+            tour.marked_trails = ways or []
+            if ways:
+                self.log("Маркированные тропы рядом: %d участков" % len(ways))
         pairs = list(zip(range(len(tour.stops)), range(1, len(tour.stops))))
         if tour.loop and len(tour.stops) > 1:
             pairs.append((len(tour.stops) - 1, 0))
@@ -410,7 +418,7 @@ class Planner:
         for number, (a, b) in enumerate(pairs):
             self.stage("legs", number / float(len(pairs)))
             segments = routing.foot_segments(self.http, tour.stops[a].point, tour.stops[b].point,
-                                             finder)
+                                             finder, trails=network)
             leg = Leg(a=a, b=b, segments=segments)
             for segment in segments:
                 prof = terrain.profile(elevation, segment.coords) if elevation else []
