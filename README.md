@@ -26,6 +26,8 @@
   <a href="CHANGELOG.md">Что нового</a>
 </p>
 
+<p align="center">Приморский филиал ФГБУ «Рослесинфорг»</p>
+
 ---
 
 <table>
@@ -112,7 +114,7 @@ gis_tour_guide/
 
 ```
 python -m unittest discover -s tests   # test_pipeline.py — нужен Python из QGIS (модуль qgis)
-python tools/build_zip.py              # dist/gis_tour_guide.zip
+python tools/build_zip.py              # dist/gis_tour_guide.zip → копия в release/gis_tour_guide-<версия>.zip
 python tools/make_doc_images.py        # скриншот окна и пример отчёта для документации
 python tools/build_docs.py             # docs/ИНСТРУКЦИЯ.pdf (нужны markdown, Node.js, Playwright)
 node tools/build_presentation.js       # PDF презентации из docs/presentation/source
