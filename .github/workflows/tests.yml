@@ -1,0 +1,19 @@
+name: Тесты
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  tests:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: QGIS и GDAL
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq python3-qgis qgis-providers python3-gdal python3-numpy
+      - name: Тесты в настоящем QGIS (без окна)
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: /usr/bin/python3 -m unittest discover -s tests -v

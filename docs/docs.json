@@ -1,0 +1,13 @@
+{
+  "title": "ГИС-экскурсовод",
+  "subtitle": "Экскурсия к любому туристическому объекту: попутные объекты, маршрут по тропам и рельефу, три фирменные карты, отчёт HTML и PDF, трек для навигатора и офлайн-пакет",
+  "org": ["ПЛАГИН QGIS"],
+  "authors": "Разработчики: Джавршян Роберт и Claude (Anthropic)",
+  "metadata": "gis_tour_guide/metadata.txt",
+  "logo": "gis_tour_guide/icon.png",
+  "logo_width": "34mm",
+  "accent": "#2f6b3f",
+  "dark": "#1f2a24",
+  "light": "#eef4ee",
+  "link": "#c2531a"
+}
